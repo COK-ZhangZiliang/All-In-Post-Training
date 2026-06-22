@@ -5,7 +5,7 @@
 <h1 align="center">All-In Post-Training</h1>
 
 <p align="center">
-  一个面向 LLM 后训练研究、工程与 Agentic RL 的可维护全景图。
+  A maintainable panorama for LLM post-training research, engineering, and agentic RL.
 </p>
 
 <p align="center">
@@ -14,18 +14,18 @@
   <img alt="Status" src="https://img.shields.io/badge/status-initial%20framework-f59e0b">
 </p>
 
-## 项目定位
+## Purpose
 
-All-In Post-Training 把后训练知识整理成一张可演进的研究地图：从 SFT、RLHF、DPO，到 RLVR、GRPO/DAPO/CISPO，再到 OPD/MOPD、多能力融合、长周期 Agentic RL、沙箱环境与评测体系。首版重点是数据结构、研究种子、静态全景页面和后续迭代计划。
+All-In Post-Training organizes post-training knowledge into an evolving research map: from SFT, RLHF, and DPO, to RLVR, GRPO/DAPO/CISPO, OPD/MOPD, multi-capability fusion, long-horizon agentic RL, sandboxed environments, and evaluation systems. The first version focuses on the data model, research seeds, static panorama page, and future roadmap.
 
-## 当前能力
+## Current Capabilities
 
-- 数据驱动知识库：`data/panorama.json` 保存论文、方法、系统、关系边和路线图元数据。
-- 离线可运行 CLI：不依赖第三方包即可校验数据并生成静态页面。
-- 静态全景图：生成 `site/index.html` 后可直接用浏览器打开，包含搜索、轨道筛选、节点详情和 SVG 关系图。
-- 项目治理：`PLAN.md` 记录研究与工程路线，`AGENTS.md` 固化协作、提交和验证规则。
+- Data-driven knowledge base: `data/panorama.json` stores papers, methods, systems, relationship edges, and roadmap metadata.
+- Offline CLI: validate data and generate the static page without third-party runtime dependencies.
+- Static panorama: generate `site/index.html` and open it directly in a browser, with search, track filtering, node details, and an SVG relationship graph.
+- Project governance: `PLAN.md` records the research and engineering roadmap, while `AGENTS.md` captures collaboration, commit, and validation rules.
 
-## 快速开始
+## Quick Start
 
 ```bash
 python3 -m venv .venv
@@ -36,40 +36,40 @@ all-in-post-training build --out site
 python -m http.server 8000 --directory site
 ```
 
-不安装包也可以直接运行：
+You can also run the project without installing it:
 
 ```bash
 PYTHONPATH=src python3 -m all_in_post_training.cli validate
 PYTHONPATH=src python3 -m all_in_post_training.cli build --out site
 ```
 
-然后打开 `http://localhost:8000`。
+Then open `http://localhost:8000`.
 
-## 仓库结构
+## Repository Structure
 
 ```text
 .
-├── AGENTS.md                         # 项目协作、验证和 Git 规则
-├── PLAN.md                           # 后训练全景图路线图
-├── README.md                         # 项目说明
-├── data/panorama.json                # 研究全景图数据源
-├── src/all_in_post_training/         # CLI、数据校验和静态站点生成器
-├── assets/icon.svg                   # 项目图标
-└── tests/                            # 离线单元测试
+├── AGENTS.md                         # Project collaboration, validation, and Git rules
+├── PLAN.md                           # Post-training panorama roadmap
+├── README.md                         # Project overview
+├── data/panorama.json                # Research panorama data source
+├── src/all_in_post_training/         # CLI, data validation, and static site generator
+├── assets/icon.svg                   # Project icon
+└── tests/                            # Offline unit tests
 ```
 
-## 研究范围
+## Research Scope
 
-首版将文档知识和外部调研归纳为六条轨道：
+The first version organizes the provided document knowledge and external research into six tracks:
 
-1. 对齐基础：SFT、RLHF、DPO、偏好数据。
-2. Reasoning RL：RLVR、GRPO、DAPO、CISPO、可验证奖励。
-3. 多能力融合：GKD/OPD、Specialist RL、MOPD、TGPO、SDPO。
-4. Agentic RL：多轮环境、turn/step-level credit assignment、dense reward。
-5. 工程基础设施：沙箱、rollout、replay、异步调度、prefix tree。
-6. 评测与安全：SWE-bench、Tool use、long-horizon eval、安全边界。
+1. Alignment foundations: SFT, RLHF, DPO, and preference data.
+2. Reasoning RL: RLVR, GRPO, DAPO, CISPO, and verifiable rewards.
+3. Multi-capability fusion: GKD/OPD, specialist RL, MOPD, TGPO, and SDPO.
+4. Agentic RL: multi-turn environments, turn/step-level credit assignment, and dense rewards.
+5. Systems infrastructure: sandboxes, rollout, replay, asynchronous scheduling, and prefix trees.
+6. Evaluation and safety: SWE-bench, tool use, long-horizon evaluation, and safety boundaries.
 
-## 常用命令
+## Common Commands
 
 ```bash
 PYTHONPATH=src python3 -m all_in_post_training.cli validate
@@ -81,4 +81,3 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ## License
 
 This project is released under the [MIT License](LICENSE).
-

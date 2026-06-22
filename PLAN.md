@@ -8,7 +8,7 @@ Build a maintainable panorama of LLM post-training: methods, research lineage, s
 
 ## Knowledge Baseline
 
-This plan is grounded in the provided Lark document, "迈向万亿参数之后：大模型后训练技术梳理", and a fresh pass over primary or near-primary sources. The working thesis is:
+This plan is grounded in the provided Lark post-training survey document and a fresh pass over primary or near-primary sources. The working thesis is:
 
 - Post-training has shifted from instruction alignment toward capability elicitation.
 - RLVR and critic-free policy optimization are now central for reasoning.
@@ -146,4 +146,3 @@ Status: planned
 - Update this file when a milestone changes status or scope.
 - Keep completed items tied to executable evidence.
 - Keep new research claims traceable to a URL in `data/panorama.json`.
-

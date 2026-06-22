@@ -22,6 +22,7 @@ This repository builds a data-driven panorama of LLM post-training research and 
 - Preserve offline usability: `PYTHONPATH=src python3 -m all_in_post_training.cli validate` should work without network access.
 - Add or update tests for schema, validation, and site generation when the data model changes.
 - Do not commit generated `site/`, cache directories, model weights, datasets, secrets, or one-off outputs.
+- Write project comments, docstrings, and repository documentation in English unless a user-facing localization file explicitly requires another language.
 - Keep code comments short and useful; explain non-obvious validation or rendering choices.
 
 ## Validation
@@ -69,4 +70,3 @@ test(catalog): cover edge endpoint validation
 - Run relevant validation before committing.
 - Confirm branch and remote target before pushing.
 - Do not rewrite shared history unless explicitly requested.
-
