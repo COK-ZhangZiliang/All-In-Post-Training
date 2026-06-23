@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
   <title id="title">All-In Post-Training icon</title>
-  <desc id="desc">A layered post-training panorama mark with orbiting nodes.</desc>
+  <desc id="desc">A layered post-training pipeline mark with orbiting nodes.</desc>
   <defs>
     <linearGradient id="g" x1="18" y1="18" x2="110" y2="110" gradientUnits="userSpaceOnUse">
       <stop stop-color="#38bdf8"/>
@@ -20,4 +20,3 @@
   <circle cx="55" cy="73" r="13" fill="#f8fafc"/>
   <path d="M51 73h8m-4-4v8" stroke="#2563eb" stroke-width="4" stroke-linecap="round"/>
 </svg>
-

@@ -1,0 +1,325 @@
+{
+  "name": "qwen3.5-2b-sft-rl-opd-reference",
+  "version": "0.2.0",
+  "output_dir": "runs",
+  "model": {
+    "name": "qwen3.5-2b-opd-policy",
+    "base_model": "Qwen/Qwen3.5-2B-Base",
+    "tokenizer": "Qwen/Qwen3.5-2B-Base",
+    "revision": "main"
+  },
+  "datasets": [
+    {
+      "id": "sft_general_chat",
+      "path": "hf://allenai/tulu-3-sft-mixture",
+      "role": "sft",
+      "format": "hf_dataset",
+      "license": "odc-by"
+    },
+    {
+      "id": "sft_instruction_scale",
+      "path": "hf://BAAI/Infinity-Instruct",
+      "role": "sft",
+      "format": "hf_dataset",
+      "license": "check-before-use"
+    },
+    {
+      "id": "sft_chat_compact",
+      "path": "hf://HuggingFaceH4/ultrachat_200k",
+      "role": "sft",
+      "format": "hf_dataset",
+      "license": "check-before-use"
+    },
+    {
+      "id": "math_rl_prompts",
+      "path": "hf://AI-MO/NuminaMath-CoT",
+      "role": "rl",
+      "format": "hf_dataset",
+      "license": "apache-2.0"
+    },
+    {
+      "id": "math_eval",
+      "path": "datasets/eval/math/*.jsonl",
+      "role": "evaluation",
+      "format": "jsonl",
+      "license": "check-before-use"
+    },
+    {
+      "id": "code_rl_tasks",
+      "path": "datasets/rl/code/*.jsonl",
+      "role": "rl",
+      "format": "jsonl",
+      "license": "check-before-use"
+    },
+    {
+      "id": "code_eval",
+      "path": "datasets/eval/code/*.jsonl",
+      "role": "evaluation",
+      "format": "jsonl",
+      "license": "check-before-use"
+    },
+    {
+      "id": "tool_agent_rl_tasks",
+      "path": "datasets/rl/tool_agent/*.jsonl",
+      "role": "rl",
+      "format": "jsonl",
+      "license": "check-before-use"
+    },
+    {
+      "id": "tool_agent_eval",
+      "path": "datasets/eval/tool_agent/*.jsonl",
+      "role": "evaluation",
+      "format": "jsonl",
+      "license": "check-before-use"
+    },
+    {
+      "id": "safety_instruction_tasks",
+      "path": "datasets/rl/safety_instruction/*.jsonl",
+      "role": "safety",
+      "format": "jsonl",
+      "license": "internal-or-compatible"
+    },
+    {
+      "id": "opd_fusion_prompts",
+      "path": "datasets/opd/fusion_prompts/*.jsonl",
+      "role": "distillation",
+      "format": "jsonl",
+      "license": "internal-or-compatible"
+    },
+    {
+      "id": "final_eval_suite",
+      "path": "datasets/eval/final/*.jsonl",
+      "role": "evaluation",
+      "format": "jsonl",
+      "license": "internal-or-compatible"
+    }
+  ],
+  "stages": [
+    {
+      "id": "ingest_data",
+      "type": "data_ingestion",
+      "inputs": {
+        "datasets": [
+          "sft_general_chat",
+          "sft_instruction_scale",
+          "sft_chat_compact",
+          "math_rl_prompts",
+          "math_eval",
+          "code_rl_tasks",
+          "code_eval",
+          "tool_agent_rl_tasks",
+          "tool_agent_eval",
+          "safety_instruction_tasks",
+          "opd_fusion_prompts",
+          "final_eval_suite"
+        ]
+      },
+      "params": {
+        "deduplicate": true,
+        "pii_scan": true,
+        "license_check": true,
+        "contamination_check": true
+      }
+    },
+    {
+      "id": "mix_sft_data",
+      "type": "data_mixture",
+      "depends_on": ["ingest_data"],
+      "inputs": {
+        "datasets": ["sft_general_chat", "sft_instruction_scale", "sft_chat_compact"]
+      },
+      "params": {
+        "strategy": "capability_weighted",
+        "target_examples": 250000,
+        "mixture": {
+          "general_chat": 0.45,
+          "math_reasoning": 0.2,
+          "code_instruction": 0.2,
+          "tool_agent_format": 0.1,
+          "safety_instruction": 0.05
+        }
+      }
+    },
+    {
+      "id": "train_sft",
+      "type": "sft",
+      "depends_on": ["mix_sft_data"],
+      "inputs": {
+        "datasets": ["sft_general_chat", "sft_instruction_scale", "sft_chat_compact"]
+      },
+      "outputs": {
+        "checkpoint": "checkpoints/qwen3.5-2b-sft"
+      },
+      "params": {
+        "backend": "trl",
+        "method": "lora_first",
+        "epochs": 2,
+        "learning_rate": 0.00002,
+        "packing": true,
+        "max_seq_length": 8192
+      }
+    },
+    {
+      "id": "train_math_rl",
+      "type": "domain_rl",
+      "depends_on": ["train_sft"],
+      "inputs": {
+        "datasets": ["math_rl_prompts"],
+        "policy": "checkpoints/qwen3.5-2b-sft",
+        "reward": "exact_answer_symbolic_numeric"
+      },
+      "outputs": {
+        "checkpoint": "checkpoints/specialists/math-rl"
+      },
+      "params": {
+        "backend": "verl",
+        "domain": "math",
+        "algorithm": "grpo",
+        "group_size": 8,
+        "kl_coefficient": 0.02,
+        "reward_components": ["format", "final_answer", "symbolic_equivalence", "numeric_tolerance"]
+      }
+    },
+    {
+      "id": "train_code_rl",
+      "type": "domain_rl",
+      "depends_on": ["train_sft"],
+      "inputs": {
+        "datasets": ["code_rl_tasks"],
+        "policy": "checkpoints/qwen3.5-2b-sft",
+        "reward": "sandboxed_unit_tests"
+      },
+      "outputs": {
+        "checkpoint": "checkpoints/specialists/code-rl"
+      },
+      "params": {
+        "backend": "verl",
+        "domain": "code",
+        "algorithm": "grpo",
+        "group_size": 6,
+        "kl_coefficient": 0.02,
+        "reward_components": ["compile", "unit_tests", "timeout", "forbidden_io"]
+      }
+    },
+    {
+      "id": "train_tool_agent_rl",
+      "type": "domain_rl",
+      "depends_on": ["train_sft"],
+      "inputs": {
+        "datasets": ["tool_agent_rl_tasks"],
+        "policy": "checkpoints/qwen3.5-2b-sft",
+        "reward": "goal_state_and_tool_validity"
+      },
+      "outputs": {
+        "checkpoint": "checkpoints/specialists/tool-agent-rl"
+      },
+      "params": {
+        "backend": "verl",
+        "domain": "tool_agent",
+        "algorithm": "grpo",
+        "group_size": 4,
+        "kl_coefficient": 0.03,
+        "max_steps": 64,
+        "reward_components": ["goal_state", "tool_schema", "step_budget", "environment_success"]
+      }
+    },
+    {
+      "id": "train_safety_instruction_rl",
+      "type": "domain_rl",
+      "depends_on": ["train_sft"],
+      "inputs": {
+        "datasets": ["safety_instruction_tasks"],
+        "policy": "checkpoints/qwen3.5-2b-sft",
+        "reward": "policy_compliance_and_helpfulness"
+      },
+      "outputs": {
+        "checkpoint": "checkpoints/specialists/safety-instruction-rl"
+      },
+      "params": {
+        "backend": "custom",
+        "domain": "safety_instruction",
+        "algorithm": "reward_model_guided_grpo",
+        "group_size": 4,
+        "kl_coefficient": 0.05,
+        "reward_components": ["policy_compliance", "helpfulness", "over_refusal", "format"]
+      }
+    },
+    {
+      "id": "opd_fuse_specialists",
+      "type": "opd_distillation",
+      "depends_on": [
+        "train_math_rl",
+        "train_code_rl",
+        "train_tool_agent_rl",
+        "train_safety_instruction_rl"
+      ],
+      "inputs": {
+        "datasets": ["opd_fusion_prompts"],
+        "student": "checkpoints/qwen3.5-2b-sft",
+        "teachers": [
+          "checkpoints/specialists/math-rl",
+          "checkpoints/specialists/code-rl",
+          "checkpoints/specialists/tool-agent-rl",
+          "checkpoints/specialists/safety-instruction-rl"
+        ]
+      },
+      "outputs": {
+        "checkpoint": "checkpoints/qwen3.5-2b-opd"
+      },
+      "params": {
+        "backend": "custom",
+        "domain_router": "prompt_classifier",
+        "objective": "reverse_kl_plus_outcome_reward",
+        "mixture": {
+          "math": 0.3,
+          "code": 0.25,
+          "tool_agent": 0.2,
+          "safety_instruction": 0.15,
+          "general_retention": 0.1
+        }
+      }
+    },
+    {
+      "id": "evaluate_policy",
+      "type": "evaluation",
+      "depends_on": ["opd_fuse_specialists"],
+      "inputs": {
+        "datasets": ["math_eval", "code_eval", "tool_agent_eval", "final_eval_suite"],
+        "policy": "checkpoints/qwen3.5-2b-opd",
+        "baselines": [
+          "Qwen/Qwen3.5-2B-Base",
+          "checkpoints/qwen3.5-2b-sft",
+          "checkpoints/specialists/math-rl",
+          "checkpoints/specialists/code-rl",
+          "checkpoints/specialists/tool-agent-rl",
+          "checkpoints/specialists/safety-instruction-rl"
+        ]
+      },
+      "params": {
+        "benchmarks": ["math", "code", "tool_agent", "safety", "general_chat"],
+        "compare_against_specialists": true,
+        "regression_gate": true
+      }
+    },
+    {
+      "id": "package_release",
+      "type": "release",
+      "depends_on": ["evaluate_policy"],
+      "inputs": {
+        "policy": "checkpoints/qwen3.5-2b-opd"
+      },
+      "params": {
+        "emit_model_card": true,
+        "emit_dataset_card": true,
+        "emit_specialist_delta_report": true,
+        "require_eval_gate": true
+      }
+    }
+  ],
+  "metadata": {
+    "owner": "post-training",
+    "purpose": "Reference Qwen3.5-2B SFT -> domain RL specialists -> OPD fusion pipeline",
+    "recipe": "sft_domain_rl_opd",
+    "model_source": "https://modelscope.cn/models/Qwen/Qwen3.5-2B-Base"
+  }
+}
