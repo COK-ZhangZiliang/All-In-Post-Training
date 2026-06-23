@@ -32,6 +32,8 @@ Before proposing or committing code changes, run the relevant checks:
 ```bash
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline validate --config examples/post_training_pipeline.json
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline plan --config examples/post_training_pipeline.json
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline inspect-data --config examples/post_training_pipeline.json --fixture-root tests/fixtures/lineage --run-id lineage-smoke
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline audit-readiness --config examples/post_training_pipeline.json --run-id readiness-smoke
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 

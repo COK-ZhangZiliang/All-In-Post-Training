@@ -1,0 +1,18 @@
+{
+  "schema": "dataset_manifest.v1",
+  "dataset_id": "code_rl_tasks",
+  "source": {
+    "name": "local_code_rl_sample",
+    "kind": "local_sample",
+    "url": "replace-with-source-url-or-internal-reference"
+  },
+  "license_status": "needs_review",
+  "split": "train",
+  "domain": "code",
+  "shards": [
+    {
+      "path": "datasets/samples/code_rl/train-00000.jsonl"
+    }
+  ],
+  "expected_record_count": 100
+}

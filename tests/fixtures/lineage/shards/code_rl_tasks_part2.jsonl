@@ -1,0 +1,1 @@
+{"prompt":"Write a Python function multiply(a, b) that returns the product.","tests":["assert multiply(2, 3) == 6","assert multiply(-1, 4) == -4"]}

@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":"What should happen before reinforcement learning?"},{"role":"assistant","content":"The base model should first learn the target chat and instruction format through SFT."}]}

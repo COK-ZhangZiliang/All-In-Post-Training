@@ -4,6 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from all_in_post_training.pipeline.audit import build_readiness_report
+from all_in_post_training.pipeline.lineage import (
+    DataInspectionError,
+    build_data_lineage_report,
+    inspect_pipeline_data,
+)
 from all_in_post_training.pipeline.config import (
     PipelineConfigError,
     load_pipeline_config,
@@ -17,6 +23,8 @@ class PipelineConfigTest(unittest.TestCase):
         config = load_pipeline_config("examples/post_training_pipeline.json")
         self.assertEqual(config.name, "qwen3.5-2b-sft-rl-opd-reference")
         self.assertEqual(config.model.base_model, "Qwen/Qwen3.5-2B-Base")
+        self.assertEqual(config.model.max_sequence_length, 8192)
+        self.assertTrue(config.model.review_checklist)
         self.assertEqual(len(config.stages), 10)
         self.assertEqual(
             [stage.id for stage in config.stages],
@@ -33,6 +41,8 @@ class PipelineConfigTest(unittest.TestCase):
                 "package_release",
             ],
         )
+        self.assertTrue(all(dataset.required_columns for dataset in config.datasets))
+        self.assertTrue(all(dataset.license_status for dataset in config.datasets))
 
     def test_rejects_unknown_dependency(self) -> None:
         with self.assertRaises(PipelineConfigError):
@@ -41,10 +51,8 @@ class PipelineConfigTest(unittest.TestCase):
                     "name": "bad",
                     "version": "0",
                     "output_dir": "runs",
-                    "model": {"name": "m", "base_model": "base"},
-                    "datasets": [
-                        {"id": "sft", "path": "data.jsonl", "role": "sft", "format": "jsonl"}
-                    ],
+                    "model": valid_model(),
+                    "datasets": [valid_dataset("sft")],
                     "stages": [
                         {"id": "train", "type": "sft", "depends_on": ["missing"]}
                     ],
@@ -58,10 +66,8 @@ class PipelineConfigTest(unittest.TestCase):
                     "name": "bad-domain",
                     "version": "0",
                     "output_dir": "runs",
-                    "model": {"name": "m", "base_model": "base"},
-                    "datasets": [
-                        {"id": "rl", "path": "data.jsonl", "role": "rl", "format": "jsonl"}
-                    ],
+                    "model": valid_model(),
+                    "datasets": [valid_dataset("rl", role="rl")],
                     "stages": [
                         {
                             "id": "train_rl",
@@ -69,6 +75,21 @@ class PipelineConfigTest(unittest.TestCase):
                             "inputs": {"datasets": ["rl"]},
                         }
                     ],
+                }
+            )
+
+    def test_rejects_dataset_without_license_metadata(self) -> None:
+        dataset = valid_dataset("sft")
+        dataset.pop("license_status")
+        with self.assertRaises(PipelineConfigError):
+            parse_pipeline_config(
+                {
+                    "name": "bad-license",
+                    "version": "0",
+                    "output_dir": "runs",
+                    "model": valid_model(),
+                    "datasets": [dataset],
+                    "stages": [{"id": "train", "type": "sft", "inputs": {"datasets": ["sft"]}}],
                 }
             )
 
@@ -101,6 +122,161 @@ class PipelineConfigTest(unittest.TestCase):
             self.assertEqual(len(result.stages), 10)
             self.assertTrue((Path(directory) / "unit-test" / "run_manifest.json").exists())
             self.assertTrue(result.artifacts)
+
+    def test_data_inspection_uses_fixtures_and_writes_report(self) -> None:
+        config = load_pipeline_config("examples/post_training_pipeline.json")
+        fixture_root = Path("tests/fixtures/lineage")
+        with tempfile.TemporaryDirectory() as directory:
+            result = inspect_pipeline_data(
+                config,
+                run_id="lineage-test",
+                fixture_root=fixture_root,
+                output_root=directory,
+            )
+            self.assertTrue(result.report_path.exists())
+            self.assertEqual(result.report["summary"]["datasets"], len(config.datasets))
+            self.assertEqual(result.report["summary"]["inspected"], len(config.datasets))
+            self.assertEqual(result.report["summary"]["errors"], 0)
+            self.assertEqual(result.report["summary"]["rejected_records"], 0)
+            fingerprints = {
+                dataset["id"]: dataset["inspection"]["fingerprint"]
+                for dataset in result.report["datasets"]
+            }
+            self.assertTrue(all(fingerprints.values()))
+            code_entry = next(
+                dataset for dataset in result.report["datasets"] if dataset["id"] == "code_rl_tasks"
+            )
+            self.assertEqual(code_entry["inspection"]["source_kind"], "manifest")
+            self.assertEqual(code_entry["inspection"]["record_count"], 2)
+            self.assertEqual(code_entry["inspection"]["quality"]["status"], "ok")
+            self.assertTrue(code_entry["inspection"]["manifest"]["path"].endswith(".manifest.json"))
+            second = build_data_lineage_report(config, fixture_root=fixture_root, strict=True)
+            self.assertEqual(
+                fingerprints["math_rl_prompts"],
+                next(
+                    dataset["inspection"]["fingerprint"]
+                    for dataset in second["datasets"]
+                    if dataset["id"] == "math_rl_prompts"
+                ),
+            )
+
+    def test_data_inspection_fails_on_missing_required_columns(self) -> None:
+        fixture_root = Path("tests/fixtures/lineage")
+        with tempfile.TemporaryDirectory() as directory:
+            bad_root = Path(directory) / "fixtures"
+            bad_root.mkdir()
+            for fixture in fixture_root.glob("*.jsonl"):
+                target = bad_root / fixture.name
+                target.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+            bad_root.joinpath("math_rl_prompts.jsonl").write_text(
+                '{"prompt":"Compute 1 + 1."}\n',
+                encoding="utf-8",
+            )
+            config = load_pipeline_config("examples/post_training_pipeline.json")
+            with self.assertRaises(DataInspectionError):
+                inspect_pipeline_data(
+                    config,
+                    run_id="bad-lineage",
+                    fixture_root=bad_root,
+                    output_root=directory,
+                )
+
+    def test_data_inspection_flags_duplicate_and_missing_quality_fields(self) -> None:
+        fixture_root = Path("tests/fixtures/lineage")
+        with tempfile.TemporaryDirectory() as directory:
+            bad_root = Path(directory) / "fixtures"
+            bad_root.mkdir()
+            for fixture in fixture_root.glob("*.jsonl"):
+                target = bad_root / fixture.name
+                target.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+            bad_root.joinpath("code_rl_tasks.jsonl").write_text(
+                "\n".join(
+                    [
+                        '{"prompt":"Write add.","tests":["assert add(1, 1) == 2"]}',
+                        '{"prompt":"Write add.","tests":[]}',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = load_pipeline_config("examples/post_training_pipeline.json")
+            report = build_data_lineage_report(config, fixture_root=bad_root, strict=True)
+            code_entry = next(
+                dataset for dataset in report["datasets"] if dataset["id"] == "code_rl_tasks"
+            )
+            self.assertEqual(code_entry["inspection"]["status"], "error")
+            self.assertEqual(code_entry["inspection"]["quality"]["rejected_count"], 1)
+            self.assertGreater(report["summary"]["rejected_records"], 0)
+            self.assertTrue(
+                any("duplicate prompt" in error for error in code_entry["inspection"]["errors"])
+            )
+            self.assertTrue(
+                any(
+                    "required column tests is empty" in error
+                    for error in code_entry["inspection"]["errors"]
+                )
+            )
+
+    def test_readiness_audit_reports_training_blockers(self) -> None:
+        config = load_pipeline_config("examples/post_training_pipeline.json")
+        report = build_readiness_report(config)
+        self.assertEqual(report["status"], "blocked")
+        self.assertGreater(report["summary"]["blockers"], 0)
+        self.assertTrue(
+            any("model revision_status must be pinned" in blocker for blocker in report["blockers"])
+        )
+        self.assertTrue(
+            any("model license_status must be approved" in blocker for blocker in report["blockers"])
+        )
+        self.assertTrue(
+            any(
+                dataset["id"] == "sft_general_chat" and dataset["status"] == "ready"
+                for dataset in report["datasets"]
+            )
+        )
+        self.assertTrue(
+            any(
+                dataset["id"] == "sft_instruction_scale" and dataset["status"] == "blocked"
+                for dataset in report["datasets"]
+            )
+        )
+
+
+def valid_model() -> dict[str, object]:
+    return {
+        "name": "m",
+        "base_model": "base",
+        "source_url": "https://example.com/model",
+        "revision": "main",
+        "revision_status": "test",
+        "tokenizer": "base",
+        "tokenizer_revision": "main",
+        "license": "test",
+        "license_status": "needs_review",
+        "precision": "bf16",
+        "max_sequence_length": 128,
+        "chat_template": "test_template",
+        "review_checklist": ["pin revision", "confirm license"],
+    }
+
+
+def valid_dataset(dataset_id: str, role: str = "sft") -> dict[str, object]:
+    return {
+        "id": dataset_id,
+        "path": f"{dataset_id}.jsonl",
+        "role": role,
+        "domain": "general",
+        "task_role": "test",
+        "format": "jsonl",
+        "schema": "sft_chat",
+        "required_columns": ["messages"],
+        "split": "train",
+        "split_policy": "test_holdout",
+        "license": "test",
+        "license_status": "needs_review",
+        "contamination_status": "not_checked",
+        "quality_filters": ["message_non_empty"],
+    }
 
 
 if __name__ == "__main__":

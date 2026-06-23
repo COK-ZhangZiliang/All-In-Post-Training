@@ -23,6 +23,35 @@ ALLOWED_STAGE_TYPES = {
     "release",
 }
 
+ALLOWED_DATASET_ROLES = {
+    "sft",
+    "preference",
+    "reward",
+    "rl",
+    "distillation",
+    "evaluation",
+    "safety",
+}
+
+ALLOWED_DATASET_FORMATS = {"jsonl", "parquet", "hf_dataset", "folder", "manifest"}
+
+ALLOWED_LICENSE_STATUSES = {
+    "approved_for_training",
+    "verified",
+    "needs_review",
+    "internal_only",
+    "compatible",
+    "blocked",
+    "unknown",
+}
+
+ALLOWED_REVISION_STATUSES = {
+    "pinned",
+    "unpinned_initial_reference",
+    "floating",
+    "unknown",
+}
+
 
 class PipelineConfigError(ValueError):
     """Raised when a post-training pipeline config is invalid."""
@@ -34,6 +63,15 @@ class ModelConfig:
     base_model: str
     tokenizer: str | None = None
     revision: str | None = None
+    source_url: str | None = None
+    tokenizer_revision: str | None = None
+    license: str | None = None
+    license_status: str | None = None
+    revision_status: str | None = None
+    precision: str | None = None
+    max_sequence_length: int | None = None
+    chat_template: str | None = None
+    review_checklist: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -44,6 +82,15 @@ class DatasetConfig:
     format: str
     split: str | None = None
     license: str | None = None
+    license_status: str | None = None
+    domain: str | None = None
+    task_role: str | None = None
+    schema: str | None = None
+    required_columns: tuple[str, ...] = ()
+    split_policy: str | None = None
+    contamination_status: str | None = None
+    quality_filters: tuple[str, ...] = ()
+    source_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -79,12 +126,39 @@ def parse_pipeline_config(raw: dict[str, Any]) -> PipelineConfig:
     _require(raw, ("name", "version", "output_dir", "model", "datasets", "stages"), "pipeline")
 
     model_raw = raw["model"]
-    _require(model_raw, ("name", "base_model"), "model")
+    _require(
+        model_raw,
+        (
+            "name",
+            "base_model",
+            "source_url",
+            "license",
+            "license_status",
+            "revision",
+            "revision_status",
+            "tokenizer",
+            "tokenizer_revision",
+            "precision",
+            "max_sequence_length",
+            "chat_template",
+            "review_checklist",
+        ),
+        "model",
+    )
     model = ModelConfig(
         name=str(model_raw["name"]),
         base_model=str(model_raw["base_model"]),
         tokenizer=_optional_str(model_raw.get("tokenizer")),
         revision=_optional_str(model_raw.get("revision")),
+        source_url=_optional_str(model_raw.get("source_url")),
+        tokenizer_revision=_optional_str(model_raw.get("tokenizer_revision")),
+        license=_optional_str(model_raw.get("license")),
+        license_status=_optional_str(model_raw.get("license_status")),
+        revision_status=_optional_str(model_raw.get("revision_status")),
+        precision=_optional_str(model_raw.get("precision")),
+        max_sequence_length=_optional_int(model_raw.get("max_sequence_length")),
+        chat_template=_optional_str(model_raw.get("chat_template")),
+        review_checklist=tuple(str(item) for item in _required_list(model_raw, "review_checklist")),
     )
 
     datasets = tuple(_parse_dataset(item) for item in raw["datasets"])
@@ -110,23 +184,46 @@ def validate_pipeline_config(config: PipelineConfig) -> None:
         raise PipelineConfigError("pipeline must define at least one dataset")
     if not config.stages:
         raise PipelineConfigError("pipeline must define at least one stage")
+    if config.model.license_status not in ALLOWED_LICENSE_STATUSES:
+        raise PipelineConfigError(
+            f"model {config.model.name} has unsupported license_status "
+            f"{config.model.license_status}"
+        )
+    if config.model.max_sequence_length is None or config.model.max_sequence_length <= 0:
+        raise PipelineConfigError("model max_sequence_length must be positive")
+    if config.model.revision_status not in ALLOWED_REVISION_STATUSES:
+        raise PipelineConfigError(
+            f"model {config.model.name} has unsupported revision_status "
+            f"{config.model.revision_status}"
+        )
+    if not config.model.review_checklist:
+        raise PipelineConfigError("model review_checklist must be non-empty")
 
     dataset_ids = _unique_ids([dataset.id for dataset in config.datasets], "dataset")
     stage_ids = _unique_ids([stage.id for stage in config.stages], "stage")
 
     for dataset in config.datasets:
-        if dataset.role not in {
-            "sft",
-            "preference",
-            "reward",
-            "rl",
-            "distillation",
-            "evaluation",
-            "safety",
-        }:
+        if dataset.role not in ALLOWED_DATASET_ROLES:
             raise PipelineConfigError(f"dataset {dataset.id} has unsupported role {dataset.role}")
-        if dataset.format not in {"jsonl", "parquet", "hf_dataset", "folder", "manifest"}:
+        if dataset.format not in ALLOWED_DATASET_FORMATS:
             raise PipelineConfigError(f"dataset {dataset.id} has unsupported format {dataset.format}")
+        if dataset.license_status not in ALLOWED_LICENSE_STATUSES:
+            raise PipelineConfigError(
+                f"dataset {dataset.id} has unsupported license_status "
+                f"{dataset.license_status}"
+            )
+        if not dataset.domain:
+            raise PipelineConfigError(f"dataset {dataset.id} must define domain")
+        if not dataset.task_role:
+            raise PipelineConfigError(f"dataset {dataset.id} must define task_role")
+        if not dataset.schema:
+            raise PipelineConfigError(f"dataset {dataset.id} must define schema")
+        if not dataset.required_columns:
+            raise PipelineConfigError(f"dataset {dataset.id} must define required_columns")
+        if not dataset.split_policy:
+            raise PipelineConfigError(f"dataset {dataset.id} must define split_policy")
+        if not dataset.contamination_status:
+            raise PipelineConfigError(f"dataset {dataset.id} must define contamination_status")
 
     for stage in config.stages:
         if stage.type not in ALLOWED_STAGE_TYPES:
@@ -171,7 +268,24 @@ def topological_stage_order(stages: tuple[StageConfig, ...]) -> list[StageConfig
 
 
 def _parse_dataset(raw: dict[str, Any]) -> DatasetConfig:
-    _require(raw, ("id", "path", "role", "format"), "dataset")
+    _require(
+        raw,
+        (
+            "id",
+            "path",
+            "role",
+            "format",
+            "license",
+            "license_status",
+            "domain",
+            "task_role",
+            "schema",
+            "required_columns",
+            "split_policy",
+            "contamination_status",
+        ),
+        "dataset",
+    )
     return DatasetConfig(
         id=str(raw["id"]),
         path=str(raw["path"]),
@@ -179,6 +293,15 @@ def _parse_dataset(raw: dict[str, Any]) -> DatasetConfig:
         format=str(raw["format"]),
         split=_optional_str(raw.get("split")),
         license=_optional_str(raw.get("license")),
+        license_status=_optional_str(raw.get("license_status")),
+        domain=_optional_str(raw.get("domain")),
+        task_role=_optional_str(raw.get("task_role")),
+        schema=_optional_str(raw.get("schema")),
+        required_columns=tuple(str(item) for item in _required_list(raw, "required_columns")),
+        split_policy=_optional_str(raw.get("split_policy")),
+        contamination_status=_optional_str(raw.get("contamination_status")),
+        quality_filters=tuple(str(item) for item in raw.get("quality_filters", ())),
+        source_url=_optional_str(raw.get("source_url")),
     )
 
 
@@ -235,3 +358,16 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _required_list(raw: dict[str, Any], field: str) -> list[Any]:
+    value = raw.get(field)
+    if not isinstance(value, (list, tuple)) or not value:
+        raise PipelineConfigError(f"{field} must be a non-empty list")
+    return list(value)

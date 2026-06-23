@@ -163,6 +163,9 @@ examples/post_training_pipeline.json
 src/all_in_post_training/pipeline/config.py
         |  validates schema, datasets, stage types, dependencies
         v
+src/all_in_post_training/pipeline/lineage.py
+        |  inspects model and dataset lineage fixtures
+        v
 src/all_in_post_training/pipeline/runner.py
         |  topologically orders stages and drives execution
         v
@@ -202,9 +205,9 @@ Exit evidence:
 - `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id smoke-sft-rl-opd`
 - `PYTHONPATH=src python3 -m unittest discover -s tests -v`
 
-### Immediate Next Step - P1.1 Dataset Lineage Foundation
+### P1.1 - Dataset Lineage Foundation
 
-Status: next
+Status: complete
 
 Objective: make the reference SFT -> domain RL -> OPD recipe auditable before connecting real training backends. The next implementation should turn the current dataset IDs and model name into validated lineage records with schema, license, source, split, fingerprint, and local inspection results.
 
@@ -240,15 +243,118 @@ Non-goals for this slice:
 - Do not add heavyweight dependencies unless they are required for robust local validation.
 - Do not commit generated `runs/` reports or real dataset files.
 
+Completed scope:
+
+- Extended model metadata with source URL, revision status, tokenizer revision, license status, precision assumptions, max sequence length, and chat-template notes.
+- Extended dataset metadata with domain, task role, schema, required columns, split policy, license status, contamination status, quality filters, and source URL.
+- Added offline JSONL fixture inspection with deterministic content fingerprints and actionable schema errors.
+- Added fixture datasets for the reference SFT, math RL, code RL, tool-agent RL, safety RL, OPD, and evaluation datasets.
+- Embedded a lineage report into the manifest backend's `ingest_data` artifact.
+- Added unit tests for lineage metadata, fixture inspection, missing license metadata, missing required columns, and deterministic fingerprints.
+
+Exit evidence:
+
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline validate --config examples/post_training_pipeline.json`
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline inspect-data --config examples/post_training_pipeline.json --fixture-root tests/fixtures/lineage --run-id lineage-smoke`
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id lineage-pipeline-smoke`
+- `PYTHONPATH=src python3 -m unittest discover -s tests -v`
+
+### Immediate Next Step - P1.2 Local Dataset Manifests And Quality Gates
+
+Status: complete
+
+Objective: move from tiny fixtures to local dataset manifests that can describe sampled public data, internal data, or synthetic data without committing real datasets to Git.
+
+Implementation slice:
+
+- Add a `dataset_manifest` JSON schema that points to local JSONL shards, declares source provenance, license status, split, domain, schema, and expected record counts.
+- Extend `inspect-data` to read manifest files and inspect all referenced shards.
+- Add quality checks for duplicate prompts, empty prompts, empty assistant responses, missing final answers, missing tests, and missing benchmark labels.
+- Add per-dataset quality summaries with record counts, rejected counts, and warning counts.
+- Add a small fixture manifest that references multiple JSONL shards to verify folder and manifest handling.
+- Keep generated reports under `runs/` and keep real datasets out of Git.
+
+Acceptance criteria:
+
+- `inspect-data` validates both direct fixture JSONL files and fixture manifest files.
+- Duplicate and empty-record fixtures fail in strict mode with actionable errors.
+- The lineage report includes per-dataset record count, fingerprint, schema status, quality status, and rejection summary.
+- Existing `pipeline validate`, `pipeline run`, and unit tests stay green.
+
+Completed scope:
+
+- Added `dataset_manifest.v1` support for local manifests that reference multiple JSONL shards.
+- Added fixture manifest coverage for `code_rl_tasks` with two local shards and an expected record count.
+- Added quality gates for duplicate prompt-like content, empty prompt-like content, empty assistant responses, missing final answers, missing code tests, missing tool definitions, missing safety labels, missing OPD domains, and missing evaluation targets or benchmark labels.
+- Added per-dataset quality summaries with checked record count, rejected count, warning count, and active checks.
+- Added strict-mode tests for duplicate prompts and missing quality fields.
+
+Exit evidence:
+
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline validate --config examples/post_training_pipeline.json`
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline inspect-data --config examples/post_training_pipeline.json --fixture-root tests/fixtures/lineage --run-id lineage-manifest-smoke`
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id quality-pipeline-smoke`
+- `PYTHONPATH=src python3 -m unittest discover -s tests -v`
+
+### Immediate Next Step - P1.3 Source Sampling And License Audit
+
+Status: in progress
+
+Objective: prepare the first real, tiny, auditable dataset samples for SFT and one RL domain without committing dataset rows or credentials to Git.
+
+Implementation slice:
+
+- Add a local-only `datasets/` layout convention documented in the README and ignored by Git.
+- Add sample manifest examples for SFT chat, math RL, code RL, OPD prompts, and eval gates.
+- Add a command or helper mode that checks whether referenced local shards exist and whether sample sizes match manifest expectations.
+- Add a model metadata review checklist for the exact `Qwen/Qwen3.5-2B-Base` revision, tokenizer revision, license, precision, max sequence length, and chat-template assumptions.
+- Add license audit states that distinguish `needs_review`, `approved_for_training`, `internal_only`, and `blocked`.
+- Run one tiny local sample inspection path on the GPU container after the changes are committed and pulled from GitHub.
+
+Acceptance criteria:
+
+- The repository documents where local datasets should live without tracking them.
+- Manifests can describe real local sample shards while keeping rows out of Git.
+- `inspect-data` can validate those sample manifests offline.
+- The plan names exactly what remains blocked before the first real SFT job.
+
+Completed local scope:
+
+- Added `examples/dataset_manifests/` with sample manifests for SFT chat, math RL, code RL, OPD prompts, and final evaluation.
+- Documented the local-only `datasets/samples/` layout in the README while keeping `datasets/` ignored by Git.
+- Added explicit license states for `approved_for_training` and `blocked`; retained `needs_review`, `internal_only`, `compatible`, and legacy `verified` for migration.
+- Added model review checklist metadata to the reference Qwen config.
+- Added `pipeline audit-readiness` to emit `runs/<run-id>/readiness_audit_report.json`.
+- Added readiness blockers for unpinned model revisions, unapproved model licenses, unpinned tokenizer revisions, dataset license states that still need review, and held-out evaluation data that still requires decontamination.
+
+Current blockers before real SFT:
+
+- `Qwen/Qwen3.5-2B-Base` model revision must be pinned to an exact ModelScope revision.
+- Tokenizer revision must be pinned.
+- Model license must be explicitly approved for the intended training and release use.
+- SFT sources still marked `needs_review` must be approved or removed from the first run.
+- Evaluation sources marked `blocked_until_decontaminated` must be decontaminated or replaced.
+
+Exit evidence so far:
+
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline audit-readiness --config examples/post_training_pipeline.json --run-id readiness-smoke`
+- `PYTHONPATH=src python3 -m unittest discover -s tests -v`
+
+Remaining to complete P1.3:
+
+- Commit and push the P1.1-P1.3 changes.
+- Run the same `audit-readiness` and `inspect-data` smoke paths from the GPU container using GitHub-managed code.
+- Optionally add a tiny local sample manifest root on the GPU container once real sample rows are available outside Git.
+
 ### P1 - Data and Dataset Lineage
 
 Status: in progress
 
 - Encode the SFT -> domain RL specialists -> OPD fusion recipe in the reference pipeline config. Completed for the manifest-backed reference config.
-- Pin `Qwen/Qwen3.5-2B-Base` revision and license metadata in the model manifest.
-- Add dataset manifest schemas for SFT, preference, reward, RL, evaluation, and safety datasets.
-- Implement local dataset inspection for JSONL and folder manifests.
-- Add data quality checks: duplicates, empty prompts, missing fields, invalid preference pairs, and license metadata.
+- Add initial `Qwen/Qwen3.5-2B-Base` model lineage metadata. Exact model revision pin and final license approval remain required before real training.
+- Add dataset manifest schemas for SFT, RL, distillation, evaluation, and safety datasets. Preference and reward-model schemas remain optional until those paths return to the main recipe.
+- Implement local JSONL fixture inspection with fingerprints and local manifest inspection with multi-shard support. Folder manifests remain planned.
+- Add initial data quality checks: duplicates, empty prompts, empty assistant responses, missing final answers, missing tests, missing benchmark labels, and missing license metadata. Preference-pair checks remain optional until preference data returns to the main recipe.
 - Add mixture recipes with capability weights and sampling policies.
 - Record dataset fingerprints and content hashes.
 

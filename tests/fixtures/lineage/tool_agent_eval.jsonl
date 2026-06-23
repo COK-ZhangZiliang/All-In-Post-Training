@@ -1,0 +1,1 @@
+{"prompt":"Use the available tool to check order A100.","target":"valid_tool_call_and_status","benchmark":"tool_agent_fixture"}

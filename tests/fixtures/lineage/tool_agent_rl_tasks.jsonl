@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":"Find the order status for order A100."}],"tools":[{"name":"lookup_order","schema":{"order_id":"string"}}],"goal":"Return the order status after one valid tool call."}

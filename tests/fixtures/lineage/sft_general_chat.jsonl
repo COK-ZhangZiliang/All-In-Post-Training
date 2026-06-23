@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":"Explain supervised fine-tuning in one sentence."},{"role":"assistant","content":"Supervised fine-tuning trains a base model on curated prompt-response examples."}]}

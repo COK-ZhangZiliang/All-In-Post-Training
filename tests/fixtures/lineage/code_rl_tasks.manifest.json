@@ -1,0 +1,20 @@
+{
+  "schema": "dataset_manifest.v1",
+  "dataset_id": "code_rl_tasks",
+  "source": {
+    "name": "code_rl_fixture_manifest",
+    "kind": "fixture"
+  },
+  "license_status": "needs_review",
+  "split": "train",
+  "domain": "code",
+  "shards": [
+    {
+      "path": "shards/code_rl_tasks_part1.jsonl"
+    },
+    {
+      "path": "shards/code_rl_tasks_part2.jsonl"
+    }
+  ],
+  "expected_record_count": 2
+}

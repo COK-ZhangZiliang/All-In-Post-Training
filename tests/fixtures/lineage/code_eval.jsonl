@@ -1,0 +1,1 @@
+{"prompt":"Write a Python function square(x).","target":"def square(x): return x * x","benchmark":"code_fixture"}

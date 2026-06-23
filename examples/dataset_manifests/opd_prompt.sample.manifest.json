@@ -1,0 +1,18 @@
+{
+  "schema": "dataset_manifest.v1",
+  "dataset_id": "opd_fusion_prompts",
+  "source": {
+    "name": "local_opd_prompt_sample",
+    "kind": "local_sample",
+    "url": "replace-with-source-url-or-internal-reference"
+  },
+  "license_status": "compatible",
+  "split": "train",
+  "domain": "mixed",
+  "shards": [
+    {
+      "path": "datasets/samples/opd/train-00000.jsonl"
+    }
+  ],
+  "expected_record_count": 100
+}

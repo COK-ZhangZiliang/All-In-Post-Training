@@ -1,0 +1,18 @@
+{
+  "schema": "dataset_manifest.v1",
+  "dataset_id": "sft_general_chat",
+  "source": {
+    "name": "local_sft_chat_sample",
+    "kind": "local_sample",
+    "url": "replace-with-source-url-or-internal-reference"
+  },
+  "license_status": "approved_for_training",
+  "split": "train",
+  "domain": "general",
+  "shards": [
+    {
+      "path": "datasets/samples/sft_chat/train-00000.jsonl"
+    }
+  ],
+  "expected_record_count": 100
+}

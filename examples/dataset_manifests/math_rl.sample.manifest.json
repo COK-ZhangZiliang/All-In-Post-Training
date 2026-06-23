@@ -1,0 +1,18 @@
+{
+  "schema": "dataset_manifest.v1",
+  "dataset_id": "math_rl_prompts",
+  "source": {
+    "name": "local_math_rl_sample",
+    "kind": "local_sample",
+    "url": "replace-with-source-url-or-internal-reference"
+  },
+  "license_status": "approved_for_training",
+  "split": "train",
+  "domain": "math",
+  "shards": [
+    {
+      "path": "datasets/samples/math_rl/train-00000.jsonl"
+    }
+  ],
+  "expected_record_count": 100
+}

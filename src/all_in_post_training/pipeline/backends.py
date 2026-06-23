@@ -6,6 +6,7 @@ from typing import Any
 
 from .artifacts import Artifact, artifact_to_dict, utc_now, write_json
 from .config import PipelineConfig, StageConfig
+from .lineage import build_data_lineage_report
 
 
 class StageBackend(ABC):
@@ -54,6 +55,12 @@ class ManifestBackend(StageBackend):
             "backend": "manifest",
             "note": "This artifact records the control-plane contract for the stage. Replace the backend to execute real training jobs.",
         }
+        if stage.type == "data_ingestion":
+            payload["lineage_report"] = build_data_lineage_report(
+                config,
+                dataset_ids=tuple(str(item) for item in stage.inputs.get("datasets", [])),
+                strict=False,
+            )
         write_json(artifact_path, payload)
         return [
             Artifact(
