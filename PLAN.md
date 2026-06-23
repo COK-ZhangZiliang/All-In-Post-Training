@@ -18,7 +18,7 @@ The intended system is a practical post-training stack with these layers:
 | Validation | Fail fast on broken dataset references, unsupported stage types, duplicate IDs, and dependency cycles | Implemented |
 | Orchestration | Order stages, run the control plane, and record run manifests | Implemented with manifest backend |
 | Artifact tracking | Emit per-stage artifact contracts and a top-level run manifest | Implemented |
-| Training backends | Connect stages to torch smoke execution now, then TRL SFT, verl, OpenRLHF, custom launchers, or internal schedulers | Torch smoke complete; SFT dry run in progress |
+| Training backends | Connect stages to torch smoke execution now, then TRL SFT, verl, OpenRLHF, custom launchers, or internal schedulers | Torch smoke and SFT dry run complete; real trainer execution planned |
 | Data processing | Ingest, deduplicate, filter, license-check, mix, and version datasets | Planned |
 | Rollout systems | Run agentic environments, sandbox tools, collect traces, and attach rewards | Planned |
 | Evaluation gates | Run capability, regression, safety, and release gates | Planned |
@@ -428,7 +428,7 @@ Status: in progress
 
 ### P2.1 - TRL SFT Dry-Run Adapter
 
-Status: in progress
+Status: complete
 
 Objective: replace the SFT stage's torch-only smoke with the first real trainer integration while keeping the run small enough for a single GPU validation pass.
 
@@ -447,18 +447,54 @@ Acceptance criteria:
 - A new SFT adapter can execute a tiny GPU job and emit a checkpoint marker without downloading or committing large datasets.
 - Tests cover dry-run command rendering and missing-dependency errors.
 
-Implementation status:
+Completed scope:
 
 - Added a `trl-sft-dry-run` backend that executes a synthetic PyTorch SFT micro-run for `sft` stages.
 - The backend writes ignored checkpoint artifacts under `runs/<run-id>/checkpoints/<stage-id>/`.
 - Non-SFT stages use torch smoke so the full reference graph still executes.
 - The adapter records optional TRL package availability and supports `--require-trl` for explicit dependency checks.
-- Local validation passes with PyTorch-dependent tests skipped when PyTorch is not installed.
+- Missing optional dependency failures now report clean CLI errors instead of tracebacks.
+- Pushed the implementation as commit `d09174a` and the CLI error handling fix as commit `c4e5998`.
 
-Exit evidence still required:
+Exit evidence:
 
-- Run `pipeline run --backend trl-sft-dry-run --require-cuda` on the GPU container from GitHub-managed code.
-- Run unit tests on the GPU container so the PyTorch SFT dry-run test executes instead of skipping.
+- Local: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed with PyTorch-dependent tests skipped because PyTorch is not installed locally.
+- Local: `PYTHONPYCACHEPREFIX=/private/tmp/aitp-pycache python3 -m compileall -q src tests`.
+- Local: `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id local-require-trl-expected-fail --backend trl-sft-dry-run --require-trl` failed cleanly with `error: trl-sft-dry-run execute mode requires optional package 'trl'`.
+- GPU: `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-trl-sft-dry-run-final --backend trl-sft-dry-run --require-cuda`.
+- GPU: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed with 13 tests and no skips.
+- GPU: `PYTHONPYCACHEPREFIX=/tmp/aitp-pycache-final python3 -m compileall -q src tests`.
+- GPU: `--require-trl` failed cleanly with status code 1 because TRL is not installed in the current container.
+
+Remote GPU result:
+
+- GPU: NVIDIA GeForce RTX 5090.
+- PyTorch: `2.7.0a0+7c8ec84dab.nv25.03`, CUDA available.
+- Full SFT dry-run pipeline: `stages=10 artifacts=10 backend=trl-sft-dry-run`.
+- SFT artifact: `backend == "trl_sft_dry_run"`, `device.type == "cuda:0"`, `loss_steps == 2`.
+- Checkpoint files: `adapter_config.json`, `synthetic_sft_state.pt`, and `trainer_state.json`.
+- TRL package availability recorded as `false`; this is expected for the current container and keeps real TRL execution as the next dependency boundary.
+
+### P2.2 - Real TRL SFT Execution Boundary
+
+Status: planned
+
+Objective: move from a synthetic SFT dry run to an optional real TRL-backed tiny run while still avoiding large model downloads or unapproved public training data.
+
+Implementation slice:
+
+- Add a dependency profile for optional training extras: TRL, Transformers, Accelerate, PEFT, Datasets, and ModelScope or Hugging Face download helpers.
+- Add a preflight command that reports installed versions, CUDA availability, free VRAM, and whether a real SFT execute mode can run.
+- Add an execute mode that can train a tiny local fixture-backed model or a deliberately tiny test model before attempting Qwen.
+- Keep Qwen execution blocked until model revision, tokenizer revision, model license, dataset license, and decontamination blockers are resolved.
+- Emit trainer logs, package versions, effective config, checkpoint marker, and failure reason artifacts.
+
+Acceptance criteria:
+
+- The default `manifest` backend remains dependency-light and offline.
+- `trl-sft-dry-run` remains available without TRL installed.
+- A new real execute path fails fast with actionable dependency or readiness errors.
+- If all optional dependencies are present, the real execute path runs a tiny SFT job on GPU and emits trainer artifacts.
 
 ### P3 - Reward and Agentic Rollout Layer
 
