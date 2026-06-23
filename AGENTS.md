@@ -42,6 +42,7 @@ When a CUDA container is available, also run:
 
 ```bash
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-torch-smoke --backend torch-smoke --require-cuda
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-trl-sft-dry-run --backend trl-sft-dry-run --require-cuda
 ```
 
 If a check cannot run, state exactly why and what was verified instead.

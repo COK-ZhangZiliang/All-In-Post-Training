@@ -7,8 +7,11 @@ from pathlib import Path
 from all_in_post_training.pipeline.audit import build_readiness_report
 from all_in_post_training.pipeline.backends import (
     ManifestBackend,
+    MissingOptionalDependencyError,
     TorchSmokeBackend,
+    TrlSftDryRunBackend,
     create_backend,
+    require_optional_dependency,
 )
 from all_in_post_training.pipeline.lineage import (
     DataInspectionError,
@@ -231,7 +234,10 @@ class PipelineConfigTest(unittest.TestCase):
             any("model revision_status must be pinned" in blocker for blocker in report["blockers"])
         )
         self.assertTrue(
-            any("model license_status must be approved" in blocker for blocker in report["blockers"])
+            any(
+                "model license_status must be approved" in blocker
+                for blocker in report["blockers"]
+            )
         )
         self.assertTrue(
             any(
@@ -248,8 +254,17 @@ class PipelineConfigTest(unittest.TestCase):
 
     def test_backend_factory_selects_manifest(self) -> None:
         self.assertIsInstance(create_backend("manifest"), ManifestBackend)
+        self.assertIsInstance(create_backend("trl-sft-dry-run"), TrlSftDryRunBackend)
         with self.assertRaises(ValueError):
             create_backend("missing")
+
+    def test_optional_dependency_error_names_missing_package(self) -> None:
+        with self.assertRaises(MissingOptionalDependencyError) as context:
+            require_optional_dependency(
+                "all_in_post_training_missing_dependency_for_test",
+                "test dependency path",
+            )
+        self.assertIn("all_in_post_training_missing_dependency_for_test", str(context.exception))
 
     def test_torch_smoke_backend_materializes_when_torch_is_available(self) -> None:
         try:
@@ -282,6 +297,51 @@ class PipelineConfigTest(unittest.TestCase):
             artifact_path = Path(result.artifacts[0].path)
             self.assertTrue(artifact_path.exists())
             self.assertIn('"backend": "torch_smoke"', artifact_path.read_text(encoding="utf-8"))
+
+    def test_trl_sft_dry_run_backend_materializes_sft_checkpoint(self) -> None:
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            self.skipTest("PyTorch is not installed")
+
+        config = load_pipeline_config("examples/post_training_pipeline.json")
+        with tempfile.TemporaryDirectory() as directory:
+            patched = parse_pipeline_config(
+                {
+                    "name": config.name,
+                    "version": config.version,
+                    "output_dir": directory,
+                    "model": config.model.__dict__,
+                    "datasets": [dataset.__dict__ for dataset in config.datasets],
+                    "stages": [
+                        {
+                            "id": "train_sft",
+                            "type": "sft",
+                            "params": {
+                                "backend": "trl",
+                                "dry_run_steps": 1,
+                                "dry_run_seq_length": 8,
+                            },
+                            "inputs": {"datasets": ["sft_general_chat"]},
+                            "outputs": {"checkpoint": "checkpoints/qwen3.5-2b-sft"},
+                        }
+                    ],
+                    "metadata": config.metadata,
+                }
+            )
+            result = PipelineRunner(backend=TrlSftDryRunBackend()).run(
+                patched,
+                run_id="trl-sft-dry-run",
+            )
+            self.assertEqual(len(result.artifacts), 1)
+            artifact_path = Path(result.artifacts[0].path)
+            checkpoint_dir = Path(directory) / "trl-sft-dry-run" / "checkpoints" / "train_sft"
+            self.assertTrue(artifact_path.exists())
+            self.assertTrue((checkpoint_dir / "trainer_state.json").exists())
+            self.assertTrue((checkpoint_dir / "adapter_config.json").exists())
+            artifact_text = artifact_path.read_text(encoding="utf-8")
+            self.assertIn('"backend": "trl_sft_dry_run"', artifact_text)
+            self.assertIn('"target": "trl.SFTTrainer"', artifact_text)
 
 
 def valid_model() -> dict[str, object]:

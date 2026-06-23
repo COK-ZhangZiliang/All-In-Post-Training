@@ -18,7 +18,7 @@ The intended system is a practical post-training stack with these layers:
 | Validation | Fail fast on broken dataset references, unsupported stage types, duplicate IDs, and dependency cycles | Implemented |
 | Orchestration | Order stages, run the control plane, and record run manifests | Implemented with manifest backend |
 | Artifact tracking | Emit per-stage artifact contracts and a top-level run manifest | Implemented |
-| Training backends | Connect stages to torch smoke execution now, then TRL, verl, OpenRLHF, custom launchers, or internal schedulers | Torch smoke implemented; real training planned |
+| Training backends | Connect stages to torch smoke execution now, then TRL SFT, verl, OpenRLHF, custom launchers, or internal schedulers | Torch smoke complete; SFT dry run in progress |
 | Data processing | Ingest, deduplicate, filter, license-check, mix, and version datasets | Planned |
 | Rollout systems | Run agentic environments, sandbox tools, collect traces, and attach rewards | Planned |
 | Evaluation gates | Run capability, regression, safety, and release gates | Planned |
@@ -170,7 +170,7 @@ src/all_in_post_training/pipeline/runner.py
         |  topologically orders stages and drives execution
         v
 src/all_in_post_training/pipeline/backends.py
-        |  backend interface; manifest backend emits contracts; torch-smoke backend executes tiny tensor workloads
+        |  backend interface; manifest backend emits contracts; torch-smoke and SFT dry-run backends execute tiny workloads
         v
 runs/<run-id>/
         |-- artifacts/<stage>.<kind>.json
@@ -417,7 +417,7 @@ Status: in progress
 
 ### P2 - Training Backend Adapters
 
-Status: planned
+Status: in progress
 
 - Add backend adapters for TRL SFT first, starting with a tiny LoRA or synthetic-batch dry run.
 - Add backend adapter contracts for verl/OpenRLHF GRPO-style RL jobs.
@@ -428,7 +428,7 @@ Status: planned
 
 ### P2.1 - TRL SFT Dry-Run Adapter
 
-Status: planned
+Status: in progress
 
 Objective: replace the SFT stage's torch-only smoke with the first real trainer integration while keeping the run small enough for a single GPU validation pass.
 
@@ -446,6 +446,19 @@ Acceptance criteria:
 - `pipeline run --backend torch-smoke --require-cuda` remains the fast CUDA topology check.
 - A new SFT adapter can execute a tiny GPU job and emit a checkpoint marker without downloading or committing large datasets.
 - Tests cover dry-run command rendering and missing-dependency errors.
+
+Implementation status:
+
+- Added a `trl-sft-dry-run` backend that executes a synthetic PyTorch SFT micro-run for `sft` stages.
+- The backend writes ignored checkpoint artifacts under `runs/<run-id>/checkpoints/<stage-id>/`.
+- Non-SFT stages use torch smoke so the full reference graph still executes.
+- The adapter records optional TRL package availability and supports `--require-trl` for explicit dependency checks.
+- Local validation passes with PyTorch-dependent tests skipped when PyTorch is not installed.
+
+Exit evidence still required:
+
+- Run `pipeline run --backend trl-sft-dry-run --require-cuda` on the GPU container from GitHub-managed code.
+- Run unit tests on the GPU container so the PyTorch SFT dry-run test executes instead of skipping.
 
 ### P3 - Reward and Agentic Rollout Layer
 

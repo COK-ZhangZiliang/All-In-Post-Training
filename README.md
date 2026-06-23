@@ -18,7 +18,7 @@
 
 All-In Post-Training is intended to become a comprehensive post-training pipeline. The repository should orchestrate the practical workflow around modern LLM post-training: dataset ingestion, mixture design, SFT, preference data, reward modeling, DPO, environment rollouts, RLVR, on-policy distillation, evaluation, release packaging, and artifact tracking.
 
-The current implementation is the first backend-oriented control plane. It validates a full pipeline configuration, orders stages by dependency, materializes per-stage artifact manifests, inspects dataset lineage fixtures, runs a tiny torch-based full-flow smoke backend, and records manifests that future training backends can replace with real jobs from TRL, verl, OpenRLHF, custom launchers, or internal systems.
+The current implementation is the first backend-oriented control plane. It validates a full pipeline configuration, orders stages by dependency, materializes per-stage artifact manifests, inspects dataset lineage fixtures, runs a tiny torch-based full-flow smoke backend, runs a synthetic SFT dry-run adapter, and records manifests that future training backends can replace with real jobs from TRL, verl, OpenRLHF, custom launchers, or internal systems.
 
 ## Current Capabilities
 
@@ -28,6 +28,7 @@ The current implementation is the first backend-oriented control plane. It valid
 - Stage planning: the CLI prints the topological execution order for the pipeline.
 - Pipeline run manifests: the manifest backend creates deterministic artifacts for each stage, embeds dataset lineage into `ingest_data`, and records `run_manifest.json`.
 - Torch smoke execution: the `torch-smoke` backend executes small tensor workloads for every stage, allowing a CUDA container to prove the SFT -> domain RL -> OPD -> evaluation -> release topology runs end to end.
+- SFT dry-run adapter: the `trl-sft-dry-run` backend executes a tiny synthetic PyTorch SFT step for `train_sft`, writes checkpoint markers under `runs/<run-id>/checkpoints/`, and uses torch smoke for the remaining stages.
 - Extensible execution backend: `StageBackend` is the extension point for real training jobs, schedulers, sandbox rollouts, or cluster launchers.
 - Project icon: `assets/icon.svg` is kept as the repository mark.
 
@@ -62,6 +63,14 @@ PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config example
 
 This command intentionally does not train `Qwen/Qwen3.5-2B-Base`. It verifies that the complete pipeline graph can run on torch/CUDA and emit stage artifacts before the real SFT, RL, and OPD launchers are connected.
 
+To run the first SFT adapter dry run on a GPU container:
+
+```bash
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-trl-sft-dry-run --backend trl-sft-dry-run --require-cuda
+```
+
+This dry run trains a tiny synthetic embedding-plus-LM-head model for a few steps, saves ignored checkpoint markers, and records whether the optional `trl` package is installed. Add `--require-trl` when you specifically want the command to fail unless TRL is present.
+
 The lineage command accepts direct fixture files such as `<dataset_id>.jsonl` and manifest files such as `<dataset_id>.manifest.json`. Manifests can reference multiple local JSONL shards without committing real datasets to Git.
 
 The lineage and smoke runs write ignored local artifacts under:
@@ -77,6 +86,11 @@ runs/smoke/
 └── run_manifest.json
 runs/gpu-torch-smoke/
 ├── artifacts/
+├── pipeline_config.snapshot.json
+└── run_manifest.json
+runs/gpu-trl-sft-dry-run/
+├── artifacts/
+├── checkpoints/
 ├── pipeline_config.snapshot.json
 └── run_manifest.json
 ```
@@ -141,6 +155,7 @@ PYTHONPATH=src python3 -m all_in_post_training.cli pipeline inspect-data --confi
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline audit-readiness --config examples/post_training_pipeline.json --run-id readiness-smoke
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id smoke
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-torch-smoke --backend torch-smoke --require-cuda
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-trl-sft-dry-run --backend trl-sft-dry-run --require-cuda
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 

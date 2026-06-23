@@ -16,7 +16,10 @@ def main(argv: list[str] | None = None) -> int:
     pipeline_parser = subparsers.add_parser("pipeline", help="Operate the post-training pipeline")
     pipeline_subparsers = pipeline_parser.add_subparsers(dest="pipeline_command", required=True)
 
-    pipeline_validate = pipeline_subparsers.add_parser("validate", help="Validate a pipeline config")
+    pipeline_validate = pipeline_subparsers.add_parser(
+        "validate",
+        help="Validate a pipeline config",
+    )
     pipeline_validate.add_argument(
         "--config", default=str(DEFAULT_PIPELINE_CONFIG), help="Path to pipeline config JSON"
     )
@@ -33,14 +36,19 @@ def main(argv: list[str] | None = None) -> int:
     pipeline_run.add_argument("--run-id", default=None, help="Stable run id for output artifacts")
     pipeline_run.add_argument(
         "--backend",
-        choices=("manifest", "torch-smoke"),
+        choices=("manifest", "torch-smoke", "trl-sft-dry-run"),
         default="manifest",
         help="Execution backend for pipeline stages",
     )
     pipeline_run.add_argument(
         "--require-cuda",
         action="store_true",
-        help="Fail torch-smoke runs unless CUDA is available",
+        help="Fail torch-backed runs unless CUDA is available",
+    )
+    pipeline_run.add_argument(
+        "--require-trl",
+        action="store_true",
+        help="Fail trl-sft-dry-run runs unless the optional TRL package is installed",
     )
 
     pipeline_inspect = pipeline_subparsers.add_parser(
@@ -92,7 +100,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{index:02d}. {stage_id}")
             return 0
         if args.pipeline_command == "run":
-            backend = create_backend(args.backend, require_cuda=args.require_cuda)
+            backend = create_backend(
+                args.backend,
+                require_cuda=args.require_cuda,
+                require_trl=args.require_trl,
+            )
             runner = PipelineRunner(backend=backend)
             result = runner.run(config, run_id=args.run_id)
             print(f"run_dir={result.run_dir}")
