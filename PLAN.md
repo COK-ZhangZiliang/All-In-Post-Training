@@ -361,7 +361,7 @@ Remaining optional follow-up:
 
 ### P1.4 - GPU Full-Flow Smoke Backend
 
-Status: in progress
+Status: complete
 
 Objective: prove that the complete SFT -> multi-domain RL -> OPD -> evaluation -> release topology can execute inside a CUDA container before the real Qwen SFT/RL/OPD launchers exist.
 
@@ -381,10 +381,27 @@ Acceptance criteria:
 - The smoke run writes 10 stage artifacts and a run manifest.
 - Unit tests pass on the GPU container with PyTorch installed.
 
-Exit evidence to collect:
+Completed scope:
+
+- Added the `torch-smoke` backend and CLI selection path.
+- Added CUDA-required failure mode through `--require-cuda`.
+- Added torch device metadata and smoke metrics to per-stage artifacts.
+- Added tests for backend selection and torch-smoke materialization when PyTorch is installed.
+- Pushed the implementation to GitHub as commit `e6a170e`.
+
+Exit evidence:
 
 - `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-torch-smoke --backend torch-smoke --require-cuda`
 - `PYTHONPATH=src python3 -m unittest discover -s tests -v`
+- `PYTHONPYCACHEPREFIX=/tmp/aitp-pycache python3 -m compileall -q src tests`
+
+Remote GPU result:
+
+- GPU: NVIDIA GeForce RTX 5090, 16 GB VRAM, driver 580.82.07.
+- PyTorch: `2.7.0a0+7c8ec84dab.nv25.03`, CUDA `12.8`, `torch.cuda.is_available() == True`.
+- Full torch smoke run: `stages=10 artifacts=10 backend=torch-smoke`.
+- The SFT artifact records `device.type == "cuda:0"` and `backend == "torch_smoke"`.
+- GPU unit tests: 11 passed, 0 skipped.
 
 ### P1 - Data and Dataset Lineage
 
@@ -408,6 +425,27 @@ Status: planned
 - Add command rendering, environment variable handling, and dry-run vs execute modes.
 - Add resource specs: GPU count, memory hints, distributed strategy, checkpoint cadence.
 - Add failure and retry states to run manifests.
+
+### P2.1 - TRL SFT Dry-Run Adapter
+
+Status: planned
+
+Objective: replace the SFT stage's torch-only smoke with the first real trainer integration while keeping the run small enough for a single GPU validation pass.
+
+Implementation slice:
+
+- Add a TRL SFT adapter contract with dry-run and execute modes.
+- Keep the first execute mode tiny: a synthetic or fixture-backed batch, LoRA enabled, one or a few optimizer steps, and output under ignored `checkpoints/`.
+- Resolve the first real dependency boundary: either optional TRL installation instructions or a runtime check that reports missing packages clearly.
+- Materialize a real SFT checkpoint marker, trainer config snapshot, loss sample, and tokenizer/model lineage reference.
+- Keep `audit-readiness` authoritative: real public-data training remains blocked until model revision, tokenizer revision, license approval, and dataset license/decontamination issues are resolved.
+
+Acceptance criteria:
+
+- `pipeline run --backend manifest` remains dependency-light and offline.
+- `pipeline run --backend torch-smoke --require-cuda` remains the fast CUDA topology check.
+- A new SFT adapter can execute a tiny GPU job and emit a checkpoint marker without downloading or committing large datasets.
+- Tests cover dry-run command rendering and missing-dependency errors.
 
 ### P3 - Reward and Agentic Rollout Layer
 
