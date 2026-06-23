@@ -239,6 +239,8 @@ def create_backend(
     if name in {"torch-smoke", "torch_smoke"}:
         return TorchSmokeBackend(require_cuda=require_cuda)
     if name in {"trl-sft-dry-run", "trl_sft_dry_run"}:
+        if require_trl:
+            require_optional_dependency("trl", "trl-sft-dry-run execute mode")
         return TrlSftDryRunBackend(require_cuda=require_cuda, require_trl=require_trl)
     raise ValueError(f"unknown backend: {name}")
 

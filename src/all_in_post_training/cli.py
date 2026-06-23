@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 
 from .pipeline.audit import audit_pipeline_readiness
-from .pipeline.backends import create_backend
+from .pipeline.backends import MissingOptionalDependencyError, create_backend
 from .pipeline.config import DEFAULT_PIPELINE_CONFIG, load_pipeline_config
 from .pipeline.lineage import DataInspectionError, inspect_pipeline_data
 from .pipeline.runner import PipelineRunner
@@ -100,13 +100,21 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{index:02d}. {stage_id}")
             return 0
         if args.pipeline_command == "run":
-            backend = create_backend(
-                args.backend,
-                require_cuda=args.require_cuda,
-                require_trl=args.require_trl,
-            )
+            try:
+                backend = create_backend(
+                    args.backend,
+                    require_cuda=args.require_cuda,
+                    require_trl=args.require_trl,
+                )
+            except MissingOptionalDependencyError as exc:
+                print(f"error: {exc}")
+                return 1
             runner = PipelineRunner(backend=backend)
-            result = runner.run(config, run_id=args.run_id)
+            try:
+                result = runner.run(config, run_id=args.run_id)
+            except RuntimeError as exc:
+                print(f"error: {exc}")
+                return 1
             print(f"run_dir={result.run_dir}")
             print(f"stages={len(result.stages)} artifacts={len(result.artifacts)}")
             print(f"backend={args.backend}")
