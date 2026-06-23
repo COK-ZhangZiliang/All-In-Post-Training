@@ -18,7 +18,7 @@ The intended system is a practical post-training stack with these layers:
 | Validation | Fail fast on broken dataset references, unsupported stage types, duplicate IDs, and dependency cycles | Implemented |
 | Orchestration | Order stages, run the control plane, and record run manifests | Implemented with manifest backend |
 | Artifact tracking | Emit per-stage artifact contracts and a top-level run manifest | Implemented |
-| Training backends | Connect stages to TRL, verl, OpenRLHF, custom launchers, or internal schedulers | Planned |
+| Training backends | Connect stages to torch smoke execution now, then TRL, verl, OpenRLHF, custom launchers, or internal schedulers | Torch smoke implemented; real training planned |
 | Data processing | Ingest, deduplicate, filter, license-check, mix, and version datasets | Planned |
 | Rollout systems | Run agentic environments, sandbox tools, collect traces, and attach rewards | Planned |
 | Evaluation gates | Run capability, regression, safety, and release gates | Planned |
@@ -170,7 +170,7 @@ src/all_in_post_training/pipeline/runner.py
         |  topologically orders stages and drives execution
         v
 src/all_in_post_training/pipeline/backends.py
-        |  backend interface; current backend emits deterministic manifests
+        |  backend interface; manifest backend emits contracts; torch-smoke backend executes tiny tensor workloads
         v
 runs/<run-id>/
         |-- artifacts/<stage>.<kind>.json
@@ -296,9 +296,9 @@ Exit evidence:
 - `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id quality-pipeline-smoke`
 - `PYTHONPATH=src python3 -m unittest discover -s tests -v`
 
-### Immediate Next Step - P1.3 Source Sampling And License Audit
+### P1.3 - Source Sampling And License Audit
 
-Status: in progress
+Status: complete
 
 Objective: prepare the first real, tiny, auditable dataset samples for SFT and one RL domain without committing dataset rows or credentials to Git.
 
@@ -340,11 +340,51 @@ Exit evidence so far:
 - `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline audit-readiness --config examples/post_training_pipeline.json --run-id readiness-smoke`
 - `PYTHONPATH=src python3 -m unittest discover -s tests -v`
 
-Remaining to complete P1.3:
+Completed remote scope:
 
-- Commit and push the P1.1-P1.3 changes.
-- Run the same `audit-readiness` and `inspect-data` smoke paths from the GPU container using GitHub-managed code.
-- Optionally add a tiny local sample manifest root on the GPU container once real sample rows are available outside Git.
+- Committed and pushed the P1.1-P1.3 changes to GitHub.
+- Ran `validate`, `inspect-data`, `audit-readiness`, `pipeline run`, `unittest`, and `compileall` from the GPU container using GitHub-managed code.
+- Confirmed the readiness audit intentionally blocks real training until model revision, tokenizer revision, model license, dataset licenses, and evaluation decontamination are approved.
+
+Remote exit evidence:
+
+- GPU environment: NVIDIA GeForce RTX 5090, CUDA available through PyTorch.
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline validate --config examples/post_training_pipeline.json`
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline inspect-data --config examples/post_training_pipeline.json --fixture-root tests/fixtures/lineage --run-id lineage-manifest-smoke`
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline audit-readiness --config examples/post_training_pipeline.json --run-id readiness-smoke`
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-manifest-smoke`
+- `PYTHONPATH=src python3 -m unittest discover -s tests -v`
+
+Remaining optional follow-up:
+
+- Add a tiny local sample manifest root on the GPU container once real sample rows are available outside Git.
+
+### P1.4 - GPU Full-Flow Smoke Backend
+
+Status: in progress
+
+Objective: prove that the complete SFT -> multi-domain RL -> OPD -> evaluation -> release topology can execute inside a CUDA container before the real Qwen SFT/RL/OPD launchers exist.
+
+Implementation slice:
+
+- Add a `torch-smoke` stage backend that lazily imports PyTorch and runs a tiny deterministic tensor workload for each stage type.
+- Add a `--backend torch-smoke` CLI option for `pipeline run`.
+- Add `--require-cuda` so GPU validation fails clearly when CUDA is unavailable.
+- Emit the same artifact kinds as the manifest backend, with torch version, CUDA version, device name, tensor shape, and smoke metric metadata.
+- Keep the smoke backend honest: artifacts must state that they are executable torch smoke artifacts, not real model checkpoints.
+- Add tests for backend selection and torch-smoke artifact materialization when PyTorch is installed.
+
+Acceptance criteria:
+
+- Local manifest backend validation remains green.
+- A CUDA container can run `pipeline run --backend torch-smoke --require-cuda` against the full reference config.
+- The smoke run writes 10 stage artifacts and a run manifest.
+- Unit tests pass on the GPU container with PyTorch installed.
+
+Exit evidence to collect:
+
+- `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-torch-smoke --backend torch-smoke --require-cuda`
+- `PYTHONPATH=src python3 -m unittest discover -s tests -v`
 
 ### P1 - Data and Dataset Lineage
 
@@ -362,7 +402,7 @@ Status: in progress
 
 Status: planned
 
-- Add backend adapters for TRL SFT first.
+- Add backend adapters for TRL SFT first, starting with a tiny LoRA or synthetic-batch dry run.
 - Add backend adapter contracts for verl/OpenRLHF GRPO-style RL jobs.
 - Add specialist checkpoint namespaces for math, code, tool/agent, and safety/instruction RL.
 - Add command rendering, environment variable handling, and dry-run vs execute modes.

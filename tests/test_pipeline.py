@@ -5,6 +5,11 @@ import unittest
 from pathlib import Path
 
 from all_in_post_training.pipeline.audit import build_readiness_report
+from all_in_post_training.pipeline.backends import (
+    ManifestBackend,
+    TorchSmokeBackend,
+    create_backend,
+)
 from all_in_post_training.pipeline.lineage import (
     DataInspectionError,
     build_data_lineage_report,
@@ -240,6 +245,43 @@ class PipelineConfigTest(unittest.TestCase):
                 for dataset in report["datasets"]
             )
         )
+
+    def test_backend_factory_selects_manifest(self) -> None:
+        self.assertIsInstance(create_backend("manifest"), ManifestBackend)
+        with self.assertRaises(ValueError):
+            create_backend("missing")
+
+    def test_torch_smoke_backend_materializes_when_torch_is_available(self) -> None:
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            self.skipTest("PyTorch is not installed")
+
+        config = load_pipeline_config("examples/post_training_pipeline.json")
+        with tempfile.TemporaryDirectory() as directory:
+            patched = parse_pipeline_config(
+                {
+                    "name": config.name,
+                    "version": config.version,
+                    "output_dir": directory,
+                    "model": config.model.__dict__,
+                    "datasets": [dataset.__dict__ for dataset in config.datasets],
+                    "stages": [
+                        {
+                            "id": "train_sft",
+                            "type": "sft",
+                            "params": {"backend": "torch-smoke"},
+                            "inputs": {"datasets": ["sft_general_chat"]},
+                        }
+                    ],
+                    "metadata": config.metadata,
+                }
+            )
+            result = PipelineRunner(backend=TorchSmokeBackend()).run(patched, run_id="torch-smoke")
+            self.assertEqual(len(result.artifacts), 1)
+            artifact_path = Path(result.artifacts[0].path)
+            self.assertTrue(artifact_path.exists())
+            self.assertIn('"backend": "torch_smoke"', artifact_path.read_text(encoding="utf-8"))
 
 
 def valid_model() -> dict[str, object]:

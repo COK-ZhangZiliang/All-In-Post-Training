@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from .pipeline.audit import audit_pipeline_readiness
+from .pipeline.backends import create_backend
 from .pipeline.config import DEFAULT_PIPELINE_CONFIG, load_pipeline_config
 from .pipeline.lineage import DataInspectionError, inspect_pipeline_data
 from .pipeline.runner import PipelineRunner
@@ -30,6 +31,17 @@ def main(argv: list[str] | None = None) -> int:
         "--config", default=str(DEFAULT_PIPELINE_CONFIG), help="Path to pipeline config JSON"
     )
     pipeline_run.add_argument("--run-id", default=None, help="Stable run id for output artifacts")
+    pipeline_run.add_argument(
+        "--backend",
+        choices=("manifest", "torch-smoke"),
+        default="manifest",
+        help="Execution backend for pipeline stages",
+    )
+    pipeline_run.add_argument(
+        "--require-cuda",
+        action="store_true",
+        help="Fail torch-smoke runs unless CUDA is available",
+    )
 
     pipeline_inspect = pipeline_subparsers.add_parser(
         "inspect-data", help="Inspect dataset lineage and local fixture data"
@@ -71,18 +83,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pipeline":
         config = load_pipeline_config(args.config)
-        runner = PipelineRunner()
         if args.pipeline_command == "validate":
             print(f"ok: {args.config} is a valid pipeline config")
             return 0
         if args.pipeline_command == "plan":
+            runner = PipelineRunner()
             for index, stage_id in enumerate(runner.plan(config), start=1):
                 print(f"{index:02d}. {stage_id}")
             return 0
         if args.pipeline_command == "run":
+            backend = create_backend(args.backend, require_cuda=args.require_cuda)
+            runner = PipelineRunner(backend=backend)
             result = runner.run(config, run_id=args.run_id)
             print(f"run_dir={result.run_dir}")
             print(f"stages={len(result.stages)} artifacts={len(result.artifacts)}")
+            print(f"backend={args.backend}")
             return 0
         if args.pipeline_command == "inspect-data":
             try:

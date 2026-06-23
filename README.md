@@ -5,7 +5,7 @@
 <h1 align="center">All-In Post-Training</h1>
 
 <p align="center">
-  A full-stack, config-driven control plane for LLM post-training pipelines.
+  A backend-first, config-driven control plane for LLM post-training pipelines.
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 
 All-In Post-Training is intended to become a comprehensive post-training pipeline. The repository should orchestrate the practical workflow around modern LLM post-training: dataset ingestion, mixture design, SFT, preference data, reward modeling, DPO, environment rollouts, RLVR, on-policy distillation, evaluation, release packaging, and artifact tracking.
 
-The current implementation is the first backend-oriented control plane. It validates a full pipeline configuration, orders stages by dependency, materializes per-stage artifact manifests, inspects dataset lineage fixtures, and records manifests that future training backends can replace with real jobs from TRL, verl, OpenRLHF, custom launchers, or internal systems.
+The current implementation is the first backend-oriented control plane. It validates a full pipeline configuration, orders stages by dependency, materializes per-stage artifact manifests, inspects dataset lineage fixtures, runs a tiny torch-based full-flow smoke backend, and records manifests that future training backends can replace with real jobs from TRL, verl, OpenRLHF, custom launchers, or internal systems.
 
 ## Current Capabilities
 
@@ -27,6 +27,7 @@ The current implementation is the first backend-oriented control plane. It valid
 - Dataset lineage inspection: local JSONL fixtures and dataset manifests can be validated for required columns, record counts, license status, quality gates, and deterministic fingerprints.
 - Stage planning: the CLI prints the topological execution order for the pipeline.
 - Pipeline run manifests: the manifest backend creates deterministic artifacts for each stage, embeds dataset lineage into `ingest_data`, and records `run_manifest.json`.
+- Torch smoke execution: the `torch-smoke` backend executes small tensor workloads for every stage, allowing a CUDA container to prove the SFT -> domain RL -> OPD -> evaluation -> release topology runs end to end.
 - Extensible execution backend: `StageBackend` is the extension point for real training jobs, schedulers, sandbox rollouts, or cluster launchers.
 - Project icon: `assets/icon.svg` is kept as the repository mark.
 
@@ -53,6 +54,14 @@ PYTHONPATH=src python3 -m all_in_post_training.cli pipeline audit-readiness --co
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id smoke
 ```
 
+For a GPU container with PyTorch and CUDA, run the executable full-flow smoke backend:
+
+```bash
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-torch-smoke --backend torch-smoke --require-cuda
+```
+
+This command intentionally does not train `Qwen/Qwen3.5-2B-Base`. It verifies that the complete pipeline graph can run on torch/CUDA and emit stage artifacts before the real SFT, RL, and OPD launchers are connected.
+
 The lineage command accepts direct fixture files such as `<dataset_id>.jsonl` and manifest files such as `<dataset_id>.manifest.json`. Manifests can reference multiple local JSONL shards without committing real datasets to Git.
 
 The lineage and smoke runs write ignored local artifacts under:
@@ -63,6 +72,10 @@ runs/lineage-smoke/
 runs/readiness-smoke/
 └── readiness_audit_report.json
 runs/smoke/
+├── artifacts/
+├── pipeline_config.snapshot.json
+└── run_manifest.json
+runs/gpu-torch-smoke/
 ├── artifacts/
 ├── pipeline_config.snapshot.json
 └── run_manifest.json
@@ -127,6 +140,7 @@ PYTHONPATH=src python3 -m all_in_post_training.cli pipeline plan --config exampl
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline inspect-data --config examples/post_training_pipeline.json --fixture-root tests/fixtures/lineage --run-id lineage-smoke
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline audit-readiness --config examples/post_training_pipeline.json --run-id readiness-smoke
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id smoke
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-torch-smoke --backend torch-smoke --require-cuda
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
