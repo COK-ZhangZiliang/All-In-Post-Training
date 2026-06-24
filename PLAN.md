@@ -508,11 +508,25 @@ Implementation status:
 - Added `trl-sft-execute` backend selection with fail-fast missing dependency errors.
 - Kept real Qwen execution blocked by readiness audit findings until model, tokenizer, license, dataset, and decontamination gates pass.
 
-Exit evidence still required:
+Exit evidence:
 
-- Run `pipeline preflight --require-cuda --require-training-extras` on the GPU container from GitHub-managed code.
-- Run `pipeline run --backend trl-sft-execute --require-cuda` on the GPU container and confirm it fails cleanly on missing optional training packages in the current environment.
-- Run unit tests on the GPU container.
+- Local: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed with PyTorch-dependent tests skipped because PyTorch is not installed locally.
+- Local: `PYTHONPYCACHEPREFIX=/private/tmp/aitp-pycache python3 -m compileall -q src tests`.
+- Local: `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline preflight --config examples/post_training_pipeline.json --run-id local-preflight --require-training-extras`.
+- Local: `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id local-trl-execute-expected-fail --backend trl-sft-execute` failed cleanly on missing optional training packages.
+- GPU: `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline preflight --config examples/post_training_pipeline.json --run-id gpu-preflight --require-cuda --require-training-extras`.
+- GPU: `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-trl-sft-execute --backend trl-sft-execute --require-cuda` failed cleanly on missing optional training packages.
+- GPU: `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-trl-sft-dry-run-preflight --backend trl-sft-dry-run --require-cuda`.
+- GPU: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed with 15 tests and no skips.
+- GPU: `PYTHONPYCACHEPREFIX=/tmp/aitp-pycache-preflight python3 -m compileall -q src tests`.
+
+Remote GPU result:
+
+- CUDA available: `true`.
+- Missing training extras: `trl`, `transformers`, `accelerate`, `peft`, and `datasets`.
+- `trl_sft_dry_run` mode: ready.
+- `trl_sft_execute` mode: blocked with 3 blocker groups.
+- `trl-sft-execute` CLI status: 1, with a clean `error:` message and no traceback.
 
 Remaining scope:
 
