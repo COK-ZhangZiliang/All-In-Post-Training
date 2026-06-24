@@ -29,6 +29,8 @@ The current implementation is the first backend-oriented control plane. It valid
 - Pipeline run manifests: the manifest backend creates deterministic artifacts for each stage, embeds dataset lineage into `ingest_data`, and records `run_manifest.json`.
 - Torch smoke execution: the `torch-smoke` backend executes small tensor workloads for every stage, allowing a CUDA container to prove the SFT -> domain RL -> OPD -> evaluation -> release topology runs end to end.
 - SFT dry-run adapter: the `trl-sft-dry-run` backend executes a tiny synthetic PyTorch SFT step for `train_sft`, writes checkpoint markers under `runs/<run-id>/checkpoints/`, and uses torch smoke for the remaining stages.
+- Training preflight: `pipeline preflight` reports CUDA, optional TRL/Transformers/PEFT/Datasets dependencies, download helpers, readiness blockers, and which backend modes can run.
+- Real TRL boundary: `trl-sft-execute` is intentionally fail-fast until optional training dependencies and readiness gates pass.
 - Extensible execution backend: `StageBackend` is the extension point for real training jobs, schedulers, sandbox rollouts, or cluster launchers.
 - Project icon: `assets/icon.svg` is kept as the repository mark.
 
@@ -52,6 +54,7 @@ PYTHONPATH=src python3 -m all_in_post_training.cli pipeline validate --config ex
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline plan --config examples/post_training_pipeline.json
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline inspect-data --config examples/post_training_pipeline.json --fixture-root tests/fixtures/lineage --run-id lineage-smoke
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline audit-readiness --config examples/post_training_pipeline.json --run-id readiness-smoke
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline preflight --config examples/post_training_pipeline.json --run-id preflight-smoke
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id smoke
 ```
 
@@ -71,6 +74,15 @@ PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config example
 
 This dry run trains a tiny synthetic embedding-plus-LM-head model for a few steps, saves ignored checkpoint markers, and records whether the optional `trl` package is installed. Add `--require-trl` when you specifically want the command to fail unless TRL is present.
 
+To inspect whether real TRL SFT execution can start:
+
+```bash
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline preflight --config examples/post_training_pipeline.json --run-id gpu-preflight --require-cuda --require-training-extras
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-trl-sft-execute --backend trl-sft-execute --require-cuda
+```
+
+The current reference config should still block real Qwen execution until the optional training stack is installed and model, tokenizer, license, dataset, and decontamination gates are resolved.
+
 The lineage command accepts direct fixture files such as `<dataset_id>.jsonl` and manifest files such as `<dataset_id>.manifest.json`. Manifests can reference multiple local JSONL shards without committing real datasets to Git.
 
 The lineage and smoke runs write ignored local artifacts under:
@@ -80,6 +92,8 @@ runs/lineage-smoke/
 └── data_lineage_report.json
 runs/readiness-smoke/
 └── readiness_audit_report.json
+runs/preflight-smoke/
+└── training_preflight_report.json
 runs/smoke/
 ├── artifacts/
 ├── pipeline_config.snapshot.json
@@ -153,6 +167,7 @@ PYTHONPATH=src python3 -m all_in_post_training.cli pipeline validate --config ex
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline plan --config examples/post_training_pipeline.json
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline inspect-data --config examples/post_training_pipeline.json --fixture-root tests/fixtures/lineage --run-id lineage-smoke
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline audit-readiness --config examples/post_training_pipeline.json --run-id readiness-smoke
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline preflight --config examples/post_training_pipeline.json --run-id preflight-smoke
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id smoke
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-torch-smoke --backend torch-smoke --require-cuda
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-trl-sft-dry-run --backend trl-sft-dry-run --require-cuda

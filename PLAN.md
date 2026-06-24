@@ -1,6 +1,6 @@
 # All-In Post-Training Plan
 
-Last updated: 2026-06-23
+Last updated: 2026-06-24
 
 ## Mission
 
@@ -18,7 +18,7 @@ The intended system is a practical post-training stack with these layers:
 | Validation | Fail fast on broken dataset references, unsupported stage types, duplicate IDs, and dependency cycles | Implemented |
 | Orchestration | Order stages, run the control plane, and record run manifests | Implemented with manifest backend |
 | Artifact tracking | Emit per-stage artifact contracts and a top-level run manifest | Implemented |
-| Training backends | Connect stages to torch smoke execution now, then TRL SFT, verl, OpenRLHF, custom launchers, or internal schedulers | Torch smoke and SFT dry run complete; real trainer execution planned |
+| Training backends | Connect stages to torch smoke execution now, then TRL SFT, verl, OpenRLHF, custom launchers, or internal schedulers | Torch smoke and SFT dry run complete; real trainer preflight in progress |
 | Data processing | Ingest, deduplicate, filter, license-check, mix, and version datasets | Planned |
 | Rollout systems | Run agentic environments, sandbox tools, collect traces, and attach rewards | Planned |
 | Evaluation gates | Run capability, regression, safety, and release gates | Planned |
@@ -171,6 +171,9 @@ src/all_in_post_training/pipeline/runner.py
         v
 src/all_in_post_training/pipeline/backends.py
         |  backend interface; manifest backend emits contracts; torch-smoke and SFT dry-run backends execute tiny workloads
+        v
+src/all_in_post_training/pipeline/preflight.py
+        |  runtime dependency, CUDA, and readiness preflight for training backends
         v
 runs/<run-id>/
         |-- artifacts/<stage>.<kind>.json
@@ -477,7 +480,7 @@ Remote GPU result:
 
 ### P2.2 - Real TRL SFT Execution Boundary
 
-Status: planned
+Status: in progress
 
 Objective: move from a synthetic SFT dry run to an optional real TRL-backed tiny run while still avoiding large model downloads or unapproved public training data.
 
@@ -495,6 +498,26 @@ Acceptance criteria:
 - `trl-sft-dry-run` remains available without TRL installed.
 - A new real execute path fails fast with actionable dependency or readiness errors.
 - If all optional dependencies are present, the real execute path runs a tiny SFT job on GPU and emits trainer artifacts.
+
+Implementation status:
+
+- Added `pipeline preflight` to emit `training_preflight_report.json`.
+- Added a dependency profile for `trl`, `transformers`, `accelerate`, `peft`, `datasets`, `modelscope`, and `huggingface_hub`.
+- Added CUDA reporting through PyTorch when PyTorch is installed.
+- Added mode readiness for `manifest`, `torch_smoke`, `trl_sft_dry_run`, and `trl_sft_execute`.
+- Added `trl-sft-execute` backend selection with fail-fast missing dependency errors.
+- Kept real Qwen execution blocked by readiness audit findings until model, tokenizer, license, dataset, and decontamination gates pass.
+
+Exit evidence still required:
+
+- Run `pipeline preflight --require-cuda --require-training-extras` on the GPU container from GitHub-managed code.
+- Run `pipeline run --backend trl-sft-execute --require-cuda` on the GPU container and confirm it fails cleanly on missing optional training packages in the current environment.
+- Run unit tests on the GPU container.
+
+Remaining scope:
+
+- Add an optional tiny real SFT runner that uses installed TRL/Transformers/Datasets when they are present.
+- Add artifact emission for real trainer logs, package versions, effective config, checkpoint marker, and failure reasons.
 
 ### P3 - Reward and Agentic Rollout Layer
 

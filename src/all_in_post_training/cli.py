@@ -6,6 +6,7 @@ from .pipeline.audit import audit_pipeline_readiness
 from .pipeline.backends import MissingOptionalDependencyError, create_backend
 from .pipeline.config import DEFAULT_PIPELINE_CONFIG, load_pipeline_config
 from .pipeline.lineage import DataInspectionError, inspect_pipeline_data
+from .pipeline.preflight import write_training_preflight_report
 from .pipeline.runner import PipelineRunner
 
 
@@ -36,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     pipeline_run.add_argument("--run-id", default=None, help="Stable run id for output artifacts")
     pipeline_run.add_argument(
         "--backend",
-        choices=("manifest", "torch-smoke", "trl-sft-dry-run"),
+        choices=("manifest", "torch-smoke", "trl-sft-dry-run", "trl-sft-execute"),
         default="manifest",
         help="Execution backend for pipeline stages",
     )
@@ -85,6 +86,33 @@ def main(argv: list[str] | None = None) -> int:
         "--output-root",
         default=None,
         help="Optional root directory for readiness audit reports",
+    )
+
+    pipeline_preflight = pipeline_subparsers.add_parser(
+        "preflight", help="Inspect runtime readiness for training backends"
+    )
+    pipeline_preflight.add_argument(
+        "--config", default=str(DEFAULT_PIPELINE_CONFIG), help="Path to pipeline config JSON"
+    )
+    pipeline_preflight.add_argument(
+        "--run-id",
+        default=None,
+        help="Stable run id for output report",
+    )
+    pipeline_preflight.add_argument(
+        "--output-root",
+        default=None,
+        help="Optional root directory for preflight reports",
+    )
+    pipeline_preflight.add_argument(
+        "--require-cuda",
+        action="store_true",
+        help="Mark torch-backed modes blocked unless CUDA is available",
+    )
+    pipeline_preflight.add_argument(
+        "--require-training-extras",
+        action="store_true",
+        help="Mark preflight blocked unless TRL training extras are installed",
     )
 
     args = parser.parse_args(argv)
@@ -155,6 +183,31 @@ def main(argv: list[str] | None = None) -> int:
                     **summary,
                 )
             )
+            return 0
+        if args.pipeline_command == "preflight":
+            result = write_training_preflight_report(
+                config,
+                run_id=args.run_id,
+                output_root=args.output_root,
+                require_cuda=args.require_cuda,
+                require_training_extras=args.require_training_extras,
+            )
+            missing = result.report["missing"]
+            cuda = result.report["cuda"]
+            print(f"report={result.report_path}")
+            print(
+                "status={status} cuda_available={cuda_available} "
+                "missing_training_extras={missing_training_extras} "
+                "missing_download_helpers={missing_download_helpers}".format(
+                    status=result.report["status"],
+                    cuda_available=cuda["available"],
+                    missing_training_extras=len(missing["training_extras"]),
+                    missing_download_helpers=len(missing["download_helpers"]),
+                )
+            )
+            for mode, status in result.report["modes"].items():
+                state = "ready" if status["ready"] else "blocked"
+                print(f"mode={mode} status={state} blockers={len(status['blockers'])}")
             return 0
 
     parser.error(f"unknown command: {args.command}")

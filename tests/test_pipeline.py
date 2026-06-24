@@ -7,16 +7,25 @@ from pathlib import Path
 from all_in_post_training.pipeline.audit import build_readiness_report
 from all_in_post_training.pipeline.backends import (
     ManifestBackend,
-    MissingOptionalDependencyError,
     TorchSmokeBackend,
     TrlSftDryRunBackend,
+    TrlSftExecuteBackend,
     create_backend,
+)
+from all_in_post_training.pipeline.dependencies import (
+    MissingOptionalDependencyError,
+    optional_dependency_status,
     require_optional_dependency,
 )
 from all_in_post_training.pipeline.lineage import (
     DataInspectionError,
     build_data_lineage_report,
     inspect_pipeline_data,
+)
+from all_in_post_training.pipeline.preflight import (
+    TRAINING_EXTRA_PACKAGES,
+    build_training_preflight_report,
+    write_training_preflight_report,
 )
 from all_in_post_training.pipeline.config import (
     PipelineConfigError,
@@ -255,6 +264,15 @@ class PipelineConfigTest(unittest.TestCase):
     def test_backend_factory_selects_manifest(self) -> None:
         self.assertIsInstance(create_backend("manifest"), ManifestBackend)
         self.assertIsInstance(create_backend("trl-sft-dry-run"), TrlSftDryRunBackend)
+        training_extras_available = all(
+            optional_dependency_status(package)["available"]
+            for package in TRAINING_EXTRA_PACKAGES
+        )
+        if training_extras_available:
+            self.assertIsInstance(create_backend("trl-sft-execute"), TrlSftExecuteBackend)
+        else:
+            with self.assertRaises(MissingOptionalDependencyError):
+                create_backend("trl-sft-execute")
         with self.assertRaises(ValueError):
             create_backend("missing")
 
@@ -265,6 +283,33 @@ class PipelineConfigTest(unittest.TestCase):
                 "test dependency path",
             )
         self.assertIn("all_in_post_training_missing_dependency_for_test", str(context.exception))
+
+    def test_training_preflight_reports_backend_modes(self) -> None:
+        config = load_pipeline_config("examples/post_training_pipeline.json")
+        report = build_training_preflight_report(config)
+        self.assertEqual(report["pipeline"], config.name)
+        self.assertIn("torch", report["packages"])
+        self.assertIn("trl_sft_execute", report["modes"])
+        self.assertFalse(report["modes"]["trl_sft_execute"]["ready"])
+        self.assertTrue(
+            any(
+                "readiness audit" in blocker
+                for blocker in report["modes"]["trl_sft_execute"]["blockers"]
+            )
+        )
+
+    def test_training_preflight_writes_report(self) -> None:
+        config = load_pipeline_config("examples/post_training_pipeline.json")
+        with tempfile.TemporaryDirectory() as directory:
+            result = write_training_preflight_report(
+                config,
+                run_id="preflight-test",
+                output_root=directory,
+                require_training_extras=True,
+            )
+            self.assertTrue(result.report_path.exists())
+            self.assertEqual(result.report["requirements"]["require_training_extras"], True)
+            self.assertIn("training_extras", result.report["missing"])
 
     def test_torch_smoke_backend_materializes_when_torch_is_available(self) -> None:
         try:

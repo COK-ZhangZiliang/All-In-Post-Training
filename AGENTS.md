@@ -34,6 +34,7 @@ PYTHONPATH=src python3 -m all_in_post_training.cli pipeline validate --config ex
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline plan --config examples/post_training_pipeline.json
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline inspect-data --config examples/post_training_pipeline.json --fixture-root tests/fixtures/lineage --run-id lineage-smoke
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline audit-readiness --config examples/post_training_pipeline.json --run-id readiness-smoke
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline preflight --config examples/post_training_pipeline.json --run-id preflight-smoke
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id smoke
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
@@ -43,6 +44,7 @@ When a CUDA container is available, also run:
 ```bash
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-torch-smoke --backend torch-smoke --require-cuda
 PYTHONPATH=src python3 -m all_in_post_training.cli pipeline run --config examples/post_training_pipeline.json --run-id gpu-trl-sft-dry-run --backend trl-sft-dry-run --require-cuda
+PYTHONPATH=src python3 -m all_in_post_training.cli pipeline preflight --config examples/post_training_pipeline.json --run-id gpu-preflight --require-cuda --require-training-extras
 ```
 
 If a check cannot run, state exactly why and what was verified instead.

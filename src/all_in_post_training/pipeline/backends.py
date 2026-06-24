@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import hashlib
-import importlib.metadata
-import importlib.util
 from pathlib import Path
 from typing import Any
 
 from .artifacts import Artifact, artifact_to_dict, utc_now, write_json
 from .config import PipelineConfig, StageConfig
+from .dependencies import (
+    MissingOptionalDependencyError,
+    optional_dependency_status,
+    require_optional_dependency,
+)
 from .lineage import build_data_lineage_report
+from .preflight import TRAINING_EXTRA_PACKAGES, trl_sft_execute_blockers
 
 
 class StageBackend(ABC):
@@ -24,10 +28,6 @@ class StageBackend(ABC):
         dependency_artifacts: dict[str, list[Artifact]],
     ) -> list[Artifact]:
         """Run a stage and return its produced artifacts."""
-
-
-class MissingOptionalDependencyError(RuntimeError):
-    """Raised when a requested optional training dependency is unavailable."""
 
 
 class ManifestBackend(StageBackend):
@@ -229,6 +229,58 @@ class TrlSftDryRunBackend(StageBackend):
         ]
 
 
+class TrlSftExecuteBackend(StageBackend):
+    """Fail-fast boundary for future real TRL SFT execution."""
+
+    def __init__(self, require_cuda: bool = False) -> None:
+        self.require_cuda = require_cuda
+        self.fallback = TorchSmokeBackend(require_cuda=require_cuda)
+
+    def run_stage(
+        self,
+        config: PipelineConfig,
+        stage: StageConfig,
+        run_dir: Path,
+        dependency_artifacts: dict[str, list[Artifact]],
+    ) -> list[Artifact]:
+        if stage.type != "sft":
+            return self.fallback.run_stage(config, stage, run_dir, dependency_artifacts)
+
+        blockers = trl_sft_execute_blockers(config, require_cuda=self.require_cuda)
+        if blockers:
+            artifact_path = run_dir / "artifacts" / f"{stage.id}.sft_execute_blocked.json"
+            payload = {
+                "created_at": utc_now(),
+                "pipeline": config.name,
+                "stage": {
+                    "id": stage.id,
+                    "type": stage.type,
+                    "depends_on": list(stage.depends_on),
+                    "params": stage.params,
+                    "inputs": stage.inputs,
+                    "outputs": stage.outputs,
+                },
+                "dependency_artifacts": {
+                    key: [artifact_to_dict(artifact) for artifact in artifacts]
+                    for key, artifacts in dependency_artifacts.items()
+                },
+                "backend": "trl_sft_execute",
+                "status": "blocked",
+                "blockers": blockers,
+                "note": (
+                    "Real TRL SFT execution is intentionally fail-fast until optional "
+                    "training dependencies and readiness gates pass."
+                ),
+            }
+            write_json(artifact_path, payload)
+            raise RuntimeError("trl-sft-execute preflight failed: " + " | ".join(blockers))
+
+        raise RuntimeError(
+            "trl-sft-execute dependencies are present, but the tiny real TRL runner "
+            "has not been enabled yet."
+        )
+
+
 def create_backend(
     name: str,
     require_cuda: bool = False,
@@ -242,6 +294,17 @@ def create_backend(
         if require_trl:
             require_optional_dependency("trl", "trl-sft-dry-run execute mode")
         return TrlSftDryRunBackend(require_cuda=require_cuda, require_trl=require_trl)
+    if name in {"trl-sft-execute", "trl_sft_execute"}:
+        missing = [
+            package
+            for package in TRAINING_EXTRA_PACKAGES
+            if not optional_dependency_status(package)["available"]
+        ]
+        if missing:
+            raise MissingOptionalDependencyError(
+                "trl-sft-execute requires optional training packages: " + ", ".join(missing)
+            )
+        return TrlSftExecuteBackend(require_cuda=require_cuda)
     raise ValueError(f"unknown backend: {name}")
 
 
@@ -323,27 +386,6 @@ def _import_torch() -> Any:
             "torch-smoke backend requires PyTorch. Install torch or use --backend manifest."
         ) from exc
     return torch
-
-
-def optional_dependency_status(package_name: str) -> dict[str, Any]:
-    spec = importlib.util.find_spec(package_name)
-    if spec is None:
-        return {"available": False, "package": package_name, "version": None}
-    try:
-        version = importlib.metadata.version(package_name)
-    except importlib.metadata.PackageNotFoundError:
-        version = "unknown"
-    return {"available": True, "package": package_name, "version": version}
-
-
-def require_optional_dependency(package_name: str, purpose: str) -> dict[str, Any]:
-    status = optional_dependency_status(package_name)
-    if not status["available"]:
-        raise MissingOptionalDependencyError(
-            f"{purpose} requires optional package {package_name!r}; "
-            "install it or run without the require flag"
-        )
-    return status
 
 
 def _select_torch_device(torch: Any, require_cuda: bool, backend_name: str) -> Any:
