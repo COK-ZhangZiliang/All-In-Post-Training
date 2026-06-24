@@ -427,9 +427,18 @@ def deterministic_shuffle(rows: list[dict[str, Any]], seed: int) -> list[dict[st
 
 
 def normalize_instruction_row(row: dict[str, Any]) -> dict[str, str]:
-    instruction = str(row.get("instruction") or row.get("prompt") or "").strip()
+    messages = row.get("messages")
+    instruction = str(
+        row.get("instruction") or row.get("prompt") or extract_instruction_from_messages(messages) or ""
+    ).strip()
     context = str(row.get("context") or row.get("input") or "").strip()
-    response = str(row.get("response") or row.get("output") or row.get("completion") or "").strip()
+    response = str(
+        row.get("response")
+        or row.get("output")
+        or row.get("completion")
+        or extract_response_from_messages(messages)
+        or ""
+    ).strip()
     category = str(row.get("category") or row.get("source") or "").strip()
     if not instruction or not response:
         raise ValueError("instruction dataset row must contain non-empty instruction and response")
@@ -439,6 +448,24 @@ def normalize_instruction_row(row: dict[str, Any]) -> dict[str, str]:
         "response": response,
         "category": category,
     }
+
+
+def extract_instruction_from_messages(messages: Any) -> str:
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            return str(message.get("content") or "").strip()
+    return ""
+
+
+def extract_response_from_messages(messages: Any) -> str:
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return str(message.get("content") or "").strip()
+    return ""
 
 
 def format_prompt(row: dict[str, str]) -> str:
@@ -589,7 +616,14 @@ def render_real_sft_curve_svg(
     plot_width = width - margin_left - margin_right
     plot_height = height - margin_top - margin_bottom
     series = [
-        ("train", [(int(item["step"]), float(item["train_loss"])) for item in train_history], "#2563eb"),
+        (
+            "train_ma8",
+            rolling_average_points(
+                [(int(item["step"]), float(item["train_loss"])) for item in train_history],
+                window=8,
+            ),
+            "#2563eb",
+        ),
         ("eval", [(int(item["step"]), float(item["eval_loss"])) for item in eval_history], "#dc2626"),
     ]
     all_points = [point for _, points, _ in series for point in points if math.isfinite(point[1])]
@@ -699,6 +733,19 @@ def select_torch_dtype(torch: Any) -> Any:
     if torch.cuda.is_available():
         return torch.float16
     return torch.float32
+
+
+def rolling_average_points(points: list[tuple[int, float]], window: int) -> list[tuple[int, float]]:
+    if window <= 1:
+        return points
+    smoothed: list[tuple[int, float]] = []
+    values: list[float] = []
+    for step, value in points:
+        values.append(value)
+        if len(values) > window:
+            values.pop(0)
+        smoothed.append((step, sum(values) / len(values)))
+    return smoothed
 
 
 def _to_float(value: Any) -> float:

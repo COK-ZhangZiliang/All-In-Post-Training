@@ -20,6 +20,7 @@ This repository builds a backend-first LLM post-training pipeline. Treat the rep
 
 - Keep the first version dependency-light. Add external packages only when they remove real pipeline complexity.
 - Preserve offline usability: `PYTHONPATH=src python3 -m all_in_post_training.cli pipeline validate --config examples/post_training_pipeline.json` should work without network access.
+- Use ModelScope (`https://modelscope.cn`) as the default platform for downloading models and datasets in future training runs. Prefer ModelScope model IDs, dataset mirrors, and cached artifacts before using Hugging Face or other sources; if a non-ModelScope source is required, record the reason in `PLAN.md` or the run metadata.
 - Add or update tests for pipeline schema, validation, stage ordering, artifact tracking, and backend behavior when the data model changes.
 - Do not commit generated `site/`, cache directories, model weights, datasets, secrets, or one-off outputs.
 - Write project comments, docstrings, and repository documentation in English unless a user-facing localization file explicitly requires another language.

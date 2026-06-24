@@ -645,6 +645,58 @@ Follow-up plan:
 - Add checkpoint selection policy: save both final and best-validation adapters when validation loss is not strictly monotonic.
 - Start the first domain RL specialist with a math verifier smoke after the SFT checkpoint selection policy is in place.
 
+### P2.6 - Larger ModelScope SFT Run
+
+Status: complete
+
+Objective: move beyond the 175-record Stanford Alpaca seed smoke and train on a larger, higher-quality ModelScope SFT source while keeping the run reproducible on the current 16GB GPU container.
+
+Completed scope:
+
+- Selected `swift/Qwen3-SFT-Mixin` from ModelScope as the next SFT dataset:
+  - Platform: `https://modelscope.cn`
+  - Dataset id: `swift/Qwen3-SFT-Mixin`
+  - File: `qwen3_32b_distill_1k.jsonl`
+  - License metadata: Apache License 2.0
+  - Size: 1,000 chat-style examples, 17.4 MB
+  - Rationale: Qwen3 32B distilled instruction/reasoning data with `messages` and `response` fields, giving longer and more capable supervision than the Stanford Alpaca seed smoke.
+- Extended the real SFT runner to normalize chat-style `messages` records by extracting the latest user message as the instruction and the latest assistant message or explicit `response` as the target.
+- Updated the SFT metric plot to show an 8-step moving average for training loss (`train_ma8`) alongside raw aggregate eval loss, avoiding the misleading single-example train-loss spikes seen in earlier plots.
+- Ran LoRA SFT on one NVIDIA GeForce RTX 5090 with CUDA, ModelScope cached Qwen weights, 800 training examples, 200 held-out validation examples, 400 optimizer steps, sequence length 512, learning rate `0.00005`, and evaluation every 50 steps.
+
+Exit evidence:
+
+- Dataset discovery and download used ModelScope APIs/URLs, not Hugging Face.
+- GPU command shape: `HF_HUB_DISABLE_XET=1 PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 /root/aitp-venv/bin/python -m all_in_post_training.pipeline.real_sft --output-dir runs/real-sft-qwen3-mixin-400/checkpoints/train_sft --run-id real-sft-qwen3-mixin-400 --model-name Qwen/Qwen3.5-2B-Base --model-source modelscope --dataset-name swift/Qwen3-SFT-Mixin --dataset-file data/raw/modelscope/qwen3_32b_distill_1k.jsonl --train-samples 800 --eval-samples 200 --epochs 1 --max-steps 400 --batch-size 1 --max-seq-length 512 --learning-rate 0.00005 --eval-every 50 --gradient-sync none`.
+- Rank0 output: `real_sft_done world_size=1 steps=400 initial_eval_loss=1.065387 final_eval_loss=0.927737`.
+- Validation trajectory:
+  - step 0: eval loss `1.065387`, perplexity `2.901962`
+  - step 50: eval loss `0.956087`, perplexity `2.601497`
+  - step 100: eval loss `0.940803`, perplexity `2.562038`
+  - step 150: eval loss `0.936954`, perplexity `2.552195`
+  - step 200: eval loss `0.935287`, perplexity `2.547945`
+  - step 250: eval loss `0.930694`, perplexity `2.536269`
+  - step 300: eval loss `0.929218`, perplexity `2.532527`
+  - step 350: eval loss `0.930726`, perplexity `2.536351`
+  - step 400: eval loss `0.927737`, perplexity `2.528780`
+- Interpretation: validation loss improved strongly overall with one small local bump at step 350; best and final validation loss are both better than every earlier checkpoint except the final checkpoint itself.
+- Validation tokens per eval: `51,542`, substantially larger and more stable than the earlier 47-example seed evaluation.
+- Local artifacts:
+  - `runs/real-sft-qwen3-mixin-400/checkpoints/train_sft/trainer_state.json`
+  - `runs/real-sft-qwen3-mixin-400/checkpoints/train_sft/eval_history.csv`
+  - `runs/real-sft-qwen3-mixin-400/checkpoints/train_sft/train_history.csv`
+  - `runs/real-sft-qwen3-mixin-400/checkpoints/train_sft/sft_eval_curve.svg`
+  - `runs/real-sft-qwen3-mixin-400/checkpoints/train_sft/dataset_preview.json`
+- Local validation after runner changes: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed 22 tests.
+- Local compile check after runner changes: `PYTHONPYCACHEPREFIX=/private/tmp/aitp-pycache python3 -m compileall -q src tests`.
+
+Follow-up plan:
+
+- Add an explicit best-validation checkpoint marker and copy/symlink the best adapter when the eval curve has local bumps.
+- Add gradient accumulation so future SFT runs can report smoother train loss and use a larger effective batch size without exceeding the 16GB GPU limit.
+- Scale data from `swift/Qwen3-SFT-Mixin` to a license-reviewed ModelScope mixture, likely starting with selected shards from `swift/swift-sft-mixture` or `AI-ModelScope/tulu-3-sft-mixture`.
+- Keep all future model and dataset downloads on ModelScope by default, with exceptions documented in run metadata.
+
 ### P3 - Reward and Agentic Rollout Layer
 
 Status: planned

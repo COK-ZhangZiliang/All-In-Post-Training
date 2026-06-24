@@ -43,6 +43,7 @@ from all_in_post_training.pipeline.real_sft import (
     load_instruction_rows,
     normalize_instruction_row,
     render_real_sft_curve_svg,
+    rolling_average_points,
     truncate_for_supervised_response,
 )
 from all_in_post_training.pipeline.runner import PipelineRunner
@@ -371,6 +372,22 @@ class PipelineConfigTest(unittest.TestCase):
         self.assertIn("<svg", svg)
         self.assertIn("unit-real-sft", svg)
         self.assertIn("final_eval_loss=2.100000", svg)
+        self.assertIn("train_ma8", svg)
+
+    def test_real_sft_normalizes_chat_messages(self) -> None:
+        row = normalize_instruction_row(
+            {
+                "messages": [
+                    {"role": "system", "content": "Be helpful."},
+                    {"role": "user", "content": "Explain merge sort."},
+                    {"role": "assistant", "content": "Merge sort divides and merges."},
+                ],
+                "source": "modelscope-chat",
+            }
+        )
+        self.assertEqual(row["instruction"], "Explain merge sort.")
+        self.assertEqual(row["response"], "Merge sort divides and merges.")
+        self.assertEqual(row["category"], "modelscope-chat")
 
     def test_real_sft_loads_local_jsonl_instruction_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -406,6 +423,12 @@ class PipelineConfigTest(unittest.TestCase):
         )
         self.assertEqual(len(prompt) + len(response), 8)
         self.assertEqual(response, response_ids)
+
+    def test_real_sft_rolling_average_points(self) -> None:
+        self.assertEqual(
+            rolling_average_points([(1, 2.0), (2, 4.0), (3, 6.0)], window=2),
+            [(1, 2.0), (2, 3.0), (3, 5.0)],
+        )
 
     def test_torch_smoke_backend_materializes_when_torch_is_available(self) -> None:
         try:
