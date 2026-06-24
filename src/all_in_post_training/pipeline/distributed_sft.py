@@ -233,6 +233,7 @@ def run_distributed_sft(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        write_loss_artifacts(output_dir, losses, run_id)
         (output_dir / "sft_fixture.json").write_text(
             json.dumps(
                 [{"prompt": prompt, "response": response} for prompt, response in SFT_TEXTS],
@@ -247,6 +248,123 @@ def run_distributed_sft(
         dist.barrier()
         dist.destroy_process_group()
     return report
+
+
+def write_loss_artifacts(output_dir: Path, losses: list[dict[str, Any]], run_id: str) -> None:
+    csv_lines = ["step,epoch,loss,local_loss,grad_norm"]
+    for item in losses:
+        csv_lines.append(
+            ",".join(
+                [
+                    str(item["step"]),
+                    str(item["epoch"]),
+                    _format_float(item["loss"]),
+                    _format_float(item["local_loss"]),
+                    _format_float(item["grad_norm"]),
+                ]
+            )
+        )
+    (output_dir / "loss_history.csv").write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
+    (output_dir / "loss_curve.svg").write_text(
+        render_loss_curve_svg(losses, title=f"{run_id} loss"),
+        encoding="utf-8",
+    )
+
+
+def render_loss_curve_svg(losses: list[dict[str, Any]], title: str = "SFT loss") -> str:
+    width = 960
+    height = 540
+    margin_left = 74
+    margin_right = 32
+    margin_top = 64
+    margin_bottom = 72
+    plot_width = width - margin_left - margin_right
+    plot_height = height - margin_top - margin_bottom
+    values = [float(item["loss"]) for item in losses if math.isfinite(float(item["loss"]))]
+    steps = [int(item["step"]) for item in losses if math.isfinite(float(item["loss"]))]
+    if not values:
+        values = [0.0]
+        steps = [0]
+    min_loss = min(values)
+    max_loss = max(values)
+    if math.isclose(min_loss, max_loss):
+        min_loss -= 0.5
+        max_loss += 0.5
+    x_min = min(steps)
+    x_max = max(steps)
+    if x_min == x_max:
+        x_min -= 1
+        x_max += 1
+
+    def x_pos(step: int) -> float:
+        return margin_left + ((step - x_min) / (x_max - x_min)) * plot_width
+
+    def y_pos(loss: float) -> float:
+        return margin_top + ((max_loss - loss) / (max_loss - min_loss)) * plot_height
+
+    points = " ".join(f"{x_pos(step):.2f},{y_pos(loss):.2f}" for step, loss in zip(steps, values))
+    grid_lines = []
+    y_labels = []
+    for index in range(5):
+        ratio = index / 4
+        y = margin_top + ratio * plot_height
+        loss_value = max_loss - ratio * (max_loss - min_loss)
+        grid_lines.append(
+            f'<line x1="{margin_left}" y1="{y:.2f}" x2="{width - margin_right}" '
+            f'y2="{y:.2f}" class="grid" />'
+        )
+        y_labels.append(
+            f'<text x="{margin_left - 12}" y="{y + 4:.2f}" text-anchor="end" '
+            f'class="axis-label">{loss_value:.3f}</text>'
+        )
+    x_labels = []
+    for index in range(5):
+        ratio = index / 4
+        x = margin_left + ratio * plot_width
+        step = round(x_min + ratio * (x_max - x_min))
+        x_labels.append(
+            f'<text x="{x:.2f}" y="{height - margin_bottom + 34}" text-anchor="middle" '
+            f'class="axis-label">{step}</text>'
+        )
+
+    final_loss = values[-1]
+    best_loss = min_loss
+    return "\n".join(
+        [
+            '<svg xmlns="http://www.w3.org/2000/svg" '
+            f'width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+            "<style>",
+            "  .bg { fill: #f8fafc; }",
+            "  .panel { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1; }",
+            "  .grid { stroke: #e2e8f0; stroke-width: 1; }",
+            "  .axis { stroke: #475569; stroke-width: 1.4; }",
+            "  .curve { fill: none; stroke: #2563eb; stroke-width: 3; stroke-linejoin: round; }",
+            "  .title { fill: #0f172a; font: 700 24px system-ui, sans-serif; }",
+            "  .subtitle { fill: #475569; font: 14px system-ui, sans-serif; }",
+            "  .axis-label { fill: #475569; font: 12px system-ui, sans-serif; }",
+            "  .caption { fill: #334155; font: 13px system-ui, sans-serif; }",
+            "</style>",
+            '<rect class="bg" x="0" y="0" width="100%" height="100%" />',
+            f'<rect class="panel" x="20" y="20" width="{width - 40}" height="{height - 40}" rx="8" />',
+            f'<text x="{margin_left}" y="42" class="title">{_escape_xml(title)}</text>',
+            f'<text x="{margin_left}" y="62" class="subtitle">steps={len(values)} '
+            f'final_loss={final_loss:.6f} best_loss={best_loss:.6f}</text>',
+            *grid_lines,
+            f'<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" '
+            f'y2="{height - margin_bottom}" class="axis" />',
+            f'<line x1="{margin_left}" y1="{height - margin_bottom}" '
+            f'x2="{width - margin_right}" y2="{height - margin_bottom}" class="axis" />',
+            *y_labels,
+            *x_labels,
+            f'<polyline class="curve" points="{points}" />',
+            f'<circle cx="{x_pos(steps[-1]):.2f}" cy="{y_pos(final_loss):.2f}" r="5" fill="#1d4ed8" />',
+            f'<text x="{width / 2:.2f}" y="{height - 20}" text-anchor="middle" '
+            'class="caption">training step</text>',
+            f'<text x="22" y="{height / 2:.2f}" transform="rotate(-90 22 {height / 2:.2f})" '
+            'text-anchor="middle" class="caption">cross entropy loss</text>',
+            "</svg>",
+        ]
+    )
 
 
 def average_gradients_via_cpu(torch: Any, dist: Any, model: Any, world_size: int) -> None:
@@ -280,6 +398,19 @@ def _to_float(value: Any) -> float:
     if hasattr(value, "detach"):
         return float(value.detach().cpu().item())
     return float(value)
+
+
+def _format_float(value: Any) -> str:
+    return f"{float(value):.10g}"
+
+
+def _escape_xml(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
 if __name__ == "__main__":

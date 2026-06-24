@@ -32,7 +32,11 @@ from all_in_post_training.pipeline.config import (
     load_pipeline_config,
     parse_pipeline_config,
 )
-from all_in_post_training.pipeline.distributed_sft import _encode_example
+from all_in_post_training.pipeline.distributed_sft import (
+    _encode_example,
+    render_loss_curve_svg,
+    write_loss_artifacts,
+)
 from all_in_post_training.pipeline.runner import PipelineRunner
 
 
@@ -316,6 +320,23 @@ class PipelineConfigTest(unittest.TestCase):
         tokens = _encode_example("Hello", "World", sequence_length=16)
         self.assertEqual(len(tokens), 16)
         self.assertTrue(all(0 <= token <= 257 for token in tokens))
+
+    def test_distributed_sft_writes_loss_artifacts(self) -> None:
+        losses = [
+            {"step": 1, "epoch": 1, "loss": 2.0, "local_loss": 2.1, "grad_norm": 0.8},
+            {"step": 2, "epoch": 1, "loss": 1.5, "local_loss": 1.6, "grad_norm": 0.7},
+        ]
+        svg = render_loss_curve_svg(losses, title="unit loss")
+        self.assertIn("<svg", svg)
+        self.assertIn("unit loss", svg)
+        self.assertIn("final_loss=1.500000", svg)
+        with tempfile.TemporaryDirectory() as directory:
+            write_loss_artifacts(Path(directory), losses, "unit-loss")
+            self.assertTrue(Path(directory, "loss_curve.svg").exists())
+            self.assertEqual(
+                Path(directory, "loss_history.csv").read_text(encoding="utf-8").splitlines()[0],
+                "step,epoch,loss,local_loss,grad_norm",
+            )
 
     def test_torch_smoke_backend_materializes_when_torch_is_available(self) -> None:
         try:
