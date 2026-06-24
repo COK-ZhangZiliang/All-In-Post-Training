@@ -89,6 +89,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hidden-size", type=int, default=64, help="Tiny model hidden size")
     parser.add_argument("--learning-rate", type=float, default=2e-3, help="AdamW learning rate")
     parser.add_argument("--backend", default=None, help="Torch distributed backend override")
+    parser.add_argument(
+        "--gradient-sync",
+        choices=("ddp", "cpu-allreduce"),
+        default="ddp",
+        help="Gradient synchronization strategy for distributed runs",
+    )
     args = parser.parse_args(argv)
 
     report = run_distributed_sft(
@@ -100,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         hidden_size=max(16, args.hidden_size),
         learning_rate=args.learning_rate,
         backend=args.backend,
+        gradient_sync=args.gradient_sync,
     )
     if report["rank"] == 0:
         print(
@@ -120,6 +127,7 @@ def run_distributed_sft(
     hidden_size: int,
     learning_rate: float,
     backend: str | None = None,
+    gradient_sync: str = "ddp",
 ) -> dict[str, Any]:
     import torch
     import torch.distributed as dist
@@ -131,7 +139,9 @@ def run_distributed_sft(
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     cuda_available = bool(torch.cuda.is_available())
-    actual_backend = backend or ("nccl" if cuda_available else "gloo")
+    actual_backend = backend or (
+        "gloo" if gradient_sync == "cpu-allreduce" else ("nccl" if cuda_available else "gloo")
+    )
 
     if distributed:
         dist.init_process_group(backend=actual_backend)
@@ -153,7 +163,8 @@ def run_distributed_sft(
 
     vocab_size = 258
     model = TinyCausalLM.build(torch, vocab_size, hidden_size, sequence_length).to(device)
-    if distributed:
+    use_ddp = distributed and gradient_sync == "ddp"
+    if use_ddp:
         model = DistributedDataParallel(model, device_ids=[local_rank] if cuda_available else None)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
@@ -173,6 +184,8 @@ def run_distributed_sft(
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            if distributed and gradient_sync == "cpu-allreduce":
+                average_gradients_via_cpu(torch, dist, model, world_size)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
@@ -198,6 +211,7 @@ def run_distributed_sft(
         "world_size": world_size,
         "distributed": distributed,
         "backend": actual_backend,
+        "gradient_sync": gradient_sync,
         "device": str(device),
         "cuda_available": cuda_available,
         "epochs": epochs,
@@ -213,7 +227,7 @@ def run_distributed_sft(
 
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
-        model_to_save = model.module if distributed else model
+        model_to_save = model.module if use_ddp else model
         torch.save(model_to_save.state_dict(), output_dir / "model_state.pt")
         (output_dir / "trainer_state.json").write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
@@ -233,6 +247,16 @@ def run_distributed_sft(
         dist.barrier()
         dist.destroy_process_group()
     return report
+
+
+def average_gradients_via_cpu(torch: Any, dist: Any, model: Any, world_size: int) -> None:
+    for parameter in model.parameters():
+        if parameter.grad is None:
+            continue
+        cpu_grad = parameter.grad.detach().cpu()
+        dist.all_reduce(cpu_grad, op=dist.ReduceOp.SUM)
+        cpu_grad /= world_size
+        parameter.grad.copy_(cpu_grad.to(parameter.grad.device))
 
 
 def build_sft_tensors(torch: Any, sequence_length: int) -> tuple[Any, Any]:
