@@ -535,7 +535,7 @@ Remaining scope:
 
 ### P2.3 - Distributed Fixture SFT
 
-Status: in progress
+Status: complete
 
 Objective: validate that two GPU containers can run one coordinated SFT training job before attempting large-model or unapproved-data training.
 
@@ -554,6 +554,25 @@ Acceptance criteria:
 - `torchrun --nnodes=2 --nproc-per-node=1` completes with world size 2.
 - Rank0 writes `model_state.pt`, `trainer_state.json`, and `sft_fixture.json`.
 - The trainer state records `distributed == true`, `world_size == 2`, the gradient sync mode, and a finite final loss.
+
+Completed scope:
+
+- Added `all_in_post_training.pipeline.distributed_sft`, a pure PyTorch tiny causal-LM SFT trainer runnable through `torchrun`.
+- Added `--gradient-sync ddp` for normal DDP environments and `--gradient-sync cpu-allreduce` for constrained GPU containers where NCCL collectives fail.
+- Validated two remote GPU containers from commit `0e9183b`, each with one NVIDIA GeForce RTX 5090 and CUDA enabled.
+- Confirmed direct NCCL/DDP initialization is blocked in the current container runtime by `ncclUnhandledCudaError: Cuda failure 1 'invalid argument'` during DDP parameter verification.
+- Completed the two-node fallback run with local CUDA forward/backward and Gloo CPU gradient all-reduce over TCP.
+
+Exit evidence:
+
+- Rank0: `172.24.89.51`; rank1: `172.24.89.35`.
+- Launch command shape: `PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 torchrun --nnodes=2 --nproc-per-node=1 --node-rank=<0|1> --master-addr 172.24.89.51 --master-port 29503 -m all_in_post_training.pipeline.distributed_sft --output-dir runs/distributed-sft-cpu-allreduce/checkpoints/train_sft --run-id distributed-sft-cpu-allreduce --epochs 6 --batch-size 2 --sequence-length 96 --hidden-size 64 --backend gloo --gradient-sync cpu-allreduce`.
+- Rank0 output: `distributed_sft_done world_size=2 steps=12 final_loss=3.663891`.
+- Rank0 artifacts: `model_state.pt` 556K, `trainer_state.json` 2.3K, and `sft_fixture.json` 1.3K.
+- Trainer state: `distributed: true`, `world_size: 2`, `backend: gloo`, `gradient_sync: cpu-allreduce`, `device: cuda:0`, `cuda_available: true`, `final_loss: 3.663891315460205`.
+- GPU node-a: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed 16 tests.
+- GPU node-b: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed 16 tests.
+- Both GPU nodes: `PYTHONPYCACHEPREFIX=/tmp/aitp-pycache-dist-sft python3 -m compileall -q src tests`.
 
 ### P3 - Reward and Agentic Rollout Layer
 
