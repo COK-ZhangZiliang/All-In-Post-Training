@@ -574,6 +574,30 @@ Exit evidence:
 - GPU node-b: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed 16 tests.
 - Both GPU nodes: `PYTHONPYCACHEPREFIX=/tmp/aitp-pycache-dist-sft python3 -m compileall -q src tests`.
 
+### P2.4 - Complete Fixture SFT With Loss Plot
+
+Status: complete
+
+Objective: complete a longer supervised fine-tuning run on the two GPU containers and produce a plotted loss curve for inspection.
+
+Completed scope:
+
+- Extended the distributed SFT trainer to write `loss_history.csv` and `loss_curve.svg` from rank0.
+- Ran a two-node SFT job from commit `248ce91` with 120 epochs, 240 optimizer steps, sequence length 128, hidden size 128, learning rate `0.003`, backend `gloo`, and gradient sync `cpu-allreduce`.
+- Kept generated training artifacts under ignored `runs/` paths.
+- Copied the lightweight rank0 loss artifacts back to the local workspace for review.
+
+Exit evidence:
+
+- Launch command shape: `PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 torchrun --nnodes=2 --nproc-per-node=1 --node-rank=<0|1> --master-addr 172.24.89.51 --master-port 29504 -m all_in_post_training.pipeline.distributed_sft --output-dir runs/full-sft-loss/checkpoints/train_sft --run-id full-sft-loss --epochs 120 --batch-size 2 --sequence-length 128 --hidden-size 128 --learning-rate 0.003 --backend gloo --gradient-sync cpu-allreduce`.
+- Rank0 output: `distributed_sft_done world_size=2 steps=240 final_loss=0.025308`.
+- Trainer state: `distributed: true`, `world_size: 2`, `backend: gloo`, `gradient_sync: cpu-allreduce`, `device: cuda:0`, `epochs: 120`, `steps: 240`, `initial_loss: 5.736392021179199`, `best_loss: 0.01371646486222744`, `final_loss: 0.025307685136795044`.
+- Rank0 artifacts: `model_state.pt`, `trainer_state.json`, `sft_fixture.json`, `loss_history.csv`, and `loss_curve.svg`.
+- Local review copies: `runs/full-sft-loss/checkpoints/train_sft/trainer_state.json`, `runs/full-sft-loss/checkpoints/train_sft/loss_history.csv`, and `runs/full-sft-loss/checkpoints/train_sft/loss_curve.svg`.
+- GPU node-a: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed 17 tests.
+- GPU node-b: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed 17 tests.
+- Both GPU nodes: `PYTHONPYCACHEPREFIX=/tmp/aitp-pycache-full-sft python3 -m compileall -q src tests`.
+
 ### P3 - Reward and Agentic Rollout Layer
 
 Status: planned

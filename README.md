@@ -29,7 +29,7 @@ The current implementation is the first backend-oriented control plane. It valid
 - Pipeline run manifests: the manifest backend creates deterministic artifacts for each stage, embeds dataset lineage into `ingest_data`, and records `run_manifest.json`.
 - Torch smoke execution: the `torch-smoke` backend executes small tensor workloads for every stage, allowing a CUDA container to prove the SFT -> domain RL -> OPD -> evaluation -> release topology runs end to end.
 - SFT dry-run adapter: the `trl-sft-dry-run` backend executes a tiny synthetic PyTorch SFT step for `train_sft`, writes checkpoint markers under `runs/<run-id>/checkpoints/`, and uses torch smoke for the remaining stages.
-- Distributed SFT fixture training: `all_in_post_training.pipeline.distributed_sft` runs a real tiny causal-LM SFT loop under `torchrun`, including DDP synchronization when NCCL is healthy and a Gloo CPU-allreduce fallback for constrained container runtimes.
+- Distributed SFT fixture training: `all_in_post_training.pipeline.distributed_sft` runs a real tiny causal-LM SFT loop under `torchrun`, including DDP synchronization when NCCL is healthy, a Gloo CPU-allreduce fallback for constrained container runtimes, and rank0 loss exports as CSV plus SVG.
 - Training preflight: `pipeline preflight` reports CUDA, optional TRL/Transformers/PEFT/Datasets dependencies, download helpers, readiness blockers, and which backend modes can run.
 - Real TRL boundary: `trl-sft-execute` is intentionally fail-fast until optional training dependencies and readiness gates pass.
 - Extensible execution backend: `StageBackend` is the extension point for real training jobs, schedulers, sandbox rollouts, or cluster launchers.
@@ -90,6 +90,8 @@ For two-node fixture SFT training, run `torchrun` on both containers with the sa
 PYTHONPATH=src torchrun --nnodes=2 --nproc-per-node=1 --node-rank=0 --master-addr <rank0-ip> --master-port 29500 -m all_in_post_training.pipeline.distributed_sft --output-dir runs/distributed-sft/checkpoints/train_sft --run-id distributed-sft --backend gloo --gradient-sync cpu-allreduce
 PYTHONPATH=src torchrun --nnodes=2 --nproc-per-node=1 --node-rank=1 --master-addr <rank0-ip> --master-port 29500 -m all_in_post_training.pipeline.distributed_sft --output-dir runs/distributed-sft/checkpoints/train_sft --run-id distributed-sft --backend gloo --gradient-sync cpu-allreduce
 ```
+
+Rank0 writes `model_state.pt`, `trainer_state.json`, `sft_fixture.json`, `loss_history.csv`, and `loss_curve.svg` under the selected output directory.
 
 The lineage command accepts direct fixture files such as `<dataset_id>.jsonl` and manifest files such as `<dataset_id>.manifest.json`. Manifests can reference multiple local JSONL shards without committing real datasets to Git.
 
