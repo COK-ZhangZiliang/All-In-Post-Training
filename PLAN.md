@@ -598,6 +598,53 @@ Exit evidence:
 - GPU node-b: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed 17 tests.
 - Both GPU nodes: `PYTHONPYCACHEPREFIX=/tmp/aitp-pycache-full-sft python3 -m compileall -q src tests`.
 
+### P2.5 - Real Qwen SFT With Validation Improvement Curve
+
+Status: complete
+
+Objective: run supervised fine-tuning with a real base model and real instruction data on the GPU container, then verify that held-out validation performance improves during SFT.
+
+Completed scope:
+
+- Added local JSON/JSONL dataset-file support to `all_in_post_training.pipeline.real_sft`, so real downloaded datasets can be used without depending on live Hugging Face dataset resolution during training.
+- Added response-preserving truncation for SFT examples. Long prompts are truncated while preserving supervised response tokens, avoiding all-ignored label batches and `nan` evaluation losses.
+- Added `--max-steps` to make short, reproducible SFT windows explicit.
+- Used `Qwen/Qwen3.5-2B-Base` from ModelScope as the real base model.
+- Used the real Stanford Alpaca `seed_tasks.jsonl` source and normalized it into 175 instruction/input/output SFT records on the GPU container.
+- Ran LoRA SFT on one NVIDIA GeForce RTX 5090 with CUDA, ModelScope cached weights, 128 training examples, 47 held-out validation examples, 112 optimizer steps, sequence length 256, learning rate `0.00005`, and evaluation every 16 steps.
+- Copied lightweight metrics and curve artifacts back into the local workspace under ignored `runs/`.
+
+Exit evidence:
+
+- GPU command shape: `HF_HUB_DISABLE_XET=1 PYTHONPATH=src CUDA_VISIBLE_DEVICES=0 /root/aitp-venv/bin/python -m all_in_post_training.pipeline.real_sft --output-dir runs/real-sft-seed-stable-112/checkpoints/train_sft --run-id real-sft-seed-stable-112 --model-name Qwen/Qwen3.5-2B-Base --model-source modelscope --dataset-name tatsu-lab/stanford_alpaca_seed_tasks --dataset-file data/raw/stanford_alpaca_seed_sft.jsonl --train-samples 128 --eval-samples 47 --epochs 1 --max-steps 112 --batch-size 1 --max-seq-length 256 --learning-rate 0.00005 --eval-every 16 --gradient-sync none`.
+- Rank0 output: `real_sft_done world_size=1 steps=112 initial_eval_loss=1.749512 final_eval_loss=1.650035`.
+- Validation trajectory was strictly non-increasing across raw evaluation points:
+  - step 0: eval loss `1.749512`, perplexity `5.751794`
+  - step 16: eval loss `1.677585`, perplexity `5.352614`
+  - step 32: eval loss `1.670431`, perplexity `5.314459`
+  - step 48: eval loss `1.664229`, perplexity `5.281598`
+  - step 64: eval loss `1.657065`, perplexity `5.243896`
+  - step 80: eval loss `1.654922`, perplexity `5.232674`
+  - step 96: eval loss `1.654203`, perplexity `5.228912`
+  - step 112: eval loss `1.650035`, perplexity `5.207161`
+- Local artifacts:
+  - `runs/real-sft-seed-stable-112/checkpoints/train_sft/trainer_state.json`
+  - `runs/real-sft-seed-stable-112/checkpoints/train_sft/eval_history.csv`
+  - `runs/real-sft-seed-stable-112/checkpoints/train_sft/train_history.csv`
+  - `runs/real-sft-seed-stable-112/checkpoints/train_sft/sft_eval_curve.svg`
+  - `runs/real-sft-seed-stable-112/checkpoints/train_sft/dataset_preview.json`
+- Local validation after runner changes: `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed 20 tests.
+- Local compile check after runner changes: `PYTHONPYCACHEPREFIX=/private/tmp/aitp-pycache python3 -m compileall -q src tests`.
+
+Follow-up plan:
+
+- Commit and push the real SFT runner updates once local Git staging is available again.
+- Add a dataset ingestion helper that downloads and normalizes public instruction datasets with source URLs, fingerprints, record counts, and license metadata.
+- Add an evaluation report command that renders raw eval loss, eval perplexity, best-so-far metrics, and monotonicity checks from `trainer_state.json`.
+- Scale SFT from the 175-row seed source to a larger license-reviewed instruction mixture, while keeping a fixed held-out validation slice.
+- Add checkpoint selection policy: save both final and best-validation adapters when validation loss is not strictly monotonic.
+- Start the first domain RL specialist with a math verifier smoke after the SFT checkpoint selection policy is in place.
+
 ### P3 - Reward and Agentic Rollout Layer
 
 Status: planned

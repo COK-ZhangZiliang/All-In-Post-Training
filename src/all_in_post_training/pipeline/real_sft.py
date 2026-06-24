@@ -28,11 +28,22 @@ def main(argv: list[str] | None = None) -> int:
         help="How to resolve --model-name",
     )
     parser.add_argument("--dataset-name", default=DOLLY_DATASET, help="Hugging Face dataset id")
+    parser.add_argument(
+        "--dataset-file",
+        default=None,
+        help="Optional local JSONL or JSON array instruction dataset file",
+    )
     parser.add_argument("--dataset-split", default="train", help="Dataset split to load")
     parser.add_argument("--train-samples", type=int, default=128, help="Number of training rows")
     parser.add_argument("--eval-samples", type=int, default=32, help="Number of evaluation rows")
     parser.add_argument("--max-seq-length", type=int, default=512, help="Maximum token length")
     parser.add_argument("--epochs", type=int, default=3, help="Number of SFT epochs")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Optional maximum optimizer steps before stopping the run",
+    )
     parser.add_argument("--batch-size", type=int, default=1, help="Per-rank batch size")
     parser.add_argument("--learning-rate", type=float, default=2e-4, help="AdamW learning rate")
     parser.add_argument("--eval-every", type=int, default=8, help="Optimizer-step eval interval")
@@ -59,11 +70,13 @@ def main(argv: list[str] | None = None) -> int:
         model_name=args.model_name,
         model_source=args.model_source,
         dataset_name=args.dataset_name,
+        dataset_file=Path(args.dataset_file) if args.dataset_file else None,
         dataset_split=args.dataset_split,
         train_samples=max(1, args.train_samples),
         eval_samples=max(1, args.eval_samples),
         max_seq_length=max(64, args.max_seq_length),
         epochs=max(1, args.epochs),
+        max_steps=max(1, args.max_steps) if args.max_steps is not None else None,
         batch_size=max(1, args.batch_size),
         learning_rate=args.learning_rate,
         eval_every=max(1, args.eval_every),
@@ -96,11 +109,13 @@ def run_real_sft(
     model_name: str,
     model_source: str,
     dataset_name: str,
+    dataset_file: Path | None,
     dataset_split: str,
     train_samples: int,
     eval_samples: int,
     max_seq_length: int,
     epochs: int,
+    max_steps: int | None,
     batch_size: int,
     learning_rate: float,
     eval_every: int,
@@ -115,7 +130,6 @@ def run_real_sft(
     import torch.distributed as dist
     from torch.utils.data import DataLoader, DistributedSampler, TensorDataset
 
-    from datasets import load_dataset
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -161,8 +175,13 @@ def run_real_sft(
     model.to(device)
     model.train()
 
+    raw_dataset = load_raw_instruction_dataset(
+        dataset_name=dataset_name,
+        dataset_file=dataset_file,
+        dataset_split=dataset_split,
+    )
     rows = load_instruction_rows(
-        load_dataset(dataset_name, split=dataset_split),
+        raw_dataset,
         train_samples=train_samples,
         eval_samples=eval_samples,
         seed=seed,
@@ -254,6 +273,10 @@ def run_real_sft(
                     )
                 )
                 model.train()
+            if max_steps is not None and step >= max_steps:
+                break
+        if max_steps is not None and step >= max_steps:
+            break
 
     if not eval_history or eval_history[-1]["step"] != step:
         eval_history.append(
@@ -285,11 +308,13 @@ def run_real_sft(
         "model_source": model_source,
         "resolved_model_path": str(model_path),
         "dataset_name": dataset_name,
+        "dataset_file": str(dataset_file) if dataset_file else None,
         "dataset_split": dataset_split,
         "train_samples": len(rows["train"]),
         "eval_samples": len(rows["eval"]),
         "max_seq_length": max_seq_length,
         "epochs": epochs,
+        "max_steps": max_steps,
         "batch_size": batch_size,
         "learning_rate": learning_rate,
         "lora": {
@@ -340,15 +365,65 @@ def resolve_model_path(model_name: str, model_source: str) -> str:
     return model_name
 
 
+def load_raw_instruction_dataset(
+    *, dataset_name: str, dataset_file: Path | None, dataset_split: str
+) -> Any:
+    if dataset_file is not None:
+        return load_instruction_dataset_file(dataset_file)
+
+    from datasets import load_dataset
+
+    return load_dataset(dataset_name, split=dataset_split)
+
+
+def load_instruction_dataset_file(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(f"instruction dataset file does not exist: {path}")
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".json":
+        data = json.loads(text)
+        if not isinstance(data, list):
+            raise ValueError("JSON instruction dataset file must contain a top-level array")
+        return [require_json_object(item, path, index + 1) for index, item in enumerate(data)]
+
+    rows: list[dict[str, Any]] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        item = json.loads(stripped)
+        rows.append(require_json_object(item, path, line_number))
+    if not rows:
+        raise ValueError(f"instruction dataset file is empty: {path}")
+    return rows
+
+
+def require_json_object(item: Any, path: Path, line_number: int) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise ValueError(f"{path}:{line_number} must be a JSON object")
+    return item
+
+
 def load_instruction_rows(dataset: Any, train_samples: int, eval_samples: int, seed: int) -> dict[str, list[dict[str, str]]]:
-    dataset = dataset.shuffle(seed=seed)
-    total = min(len(dataset), train_samples + eval_samples)
-    selected = dataset.select(range(total))
+    if hasattr(dataset, "shuffle") and hasattr(dataset, "select"):
+        dataset = dataset.shuffle(seed=seed)
+        total = min(len(dataset), train_samples + eval_samples)
+        selected = dataset.select(range(total))
+    else:
+        selected = deterministic_shuffle(list(dataset), seed)[: train_samples + eval_samples]
     rows = [normalize_instruction_row(row) for row in selected]
     return {
         "train": rows[: min(train_samples, len(rows))],
         "eval": rows[min(train_samples, len(rows)) :],
     }
+
+
+def deterministic_shuffle(rows: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:
+    import random
+
+    shuffled = list(rows)
+    random.Random(seed).shuffle(shuffled)
+    return shuffled
 
 
 def normalize_instruction_row(row: dict[str, Any]) -> dict[str, str]:
@@ -389,8 +464,13 @@ def build_sft_dataset(tokenizer: Any, rows: list[dict[str, str]], max_seq_length
     for row in rows:
         prompt_ids = tokenizer(format_prompt(row), add_special_tokens=False)["input_ids"]
         response_ids = tokenizer(row["response"] + eos, add_special_tokens=False)["input_ids"]
-        ids = (prompt_ids + response_ids)[:max_seq_length]
-        row_labels = ([-100] * len(prompt_ids) + response_ids)[:max_seq_length]
+        prompt_ids, response_ids = truncate_for_supervised_response(
+            prompt_ids,
+            response_ids,
+            max_seq_length,
+        )
+        ids = prompt_ids + response_ids
+        row_labels = ([-100] * len(prompt_ids)) + response_ids
         attention = [1] * len(ids)
         padding = max_seq_length - len(ids)
         if padding > 0:
@@ -405,6 +485,20 @@ def build_sft_dataset(tokenizer: Any, rows: list[dict[str, str]], max_seq_length
         torch.tensor(attention_masks, dtype=torch.long),
         torch.tensor(labels, dtype=torch.long),
     )
+
+
+def truncate_for_supervised_response(
+    prompt_ids: list[int],
+    response_ids: list[int],
+    max_seq_length: int,
+) -> tuple[list[int], list[int]]:
+    if len(prompt_ids) + len(response_ids) <= max_seq_length:
+        return prompt_ids, response_ids
+    if not response_ids:
+        raise ValueError("SFT row must contain at least one response token")
+    response_budget = min(len(response_ids), max(1, max_seq_length // 2))
+    prompt_budget = max_seq_length - response_budget
+    return prompt_ids[:prompt_budget], response_ids[:response_budget]
 
 
 def evaluate_model(
@@ -430,6 +524,8 @@ def evaluate_model(
             labels = labels.to(device)
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             token_count = (labels != -100).sum().to(dtype=torch.float32)
+            if int(token_count.cpu().item()) == 0:
+                continue
             total_loss += outputs.loss.detach() * token_count
             total_tokens += token_count
     if distributed:

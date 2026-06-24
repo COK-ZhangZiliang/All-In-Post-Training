@@ -39,8 +39,11 @@ from all_in_post_training.pipeline.distributed_sft import (
 )
 from all_in_post_training.pipeline.real_sft import (
     format_prompt,
+    load_instruction_dataset_file,
+    load_instruction_rows,
     normalize_instruction_row,
     render_real_sft_curve_svg,
+    truncate_for_supervised_response,
 )
 from all_in_post_training.pipeline.runner import PipelineRunner
 
@@ -368,6 +371,41 @@ class PipelineConfigTest(unittest.TestCase):
         self.assertIn("<svg", svg)
         self.assertIn("unit-real-sft", svg)
         self.assertIn("final_eval_loss=2.100000", svg)
+
+    def test_real_sft_loads_local_jsonl_instruction_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "alpaca.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        '{"instruction":"First task","input":"","output":"First answer"}',
+                        '{"instruction":"Second task","input":"","output":"Second answer"}',
+                        '{"instruction":"Third task","input":"","output":"Third answer"}',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rows = load_instruction_rows(
+                load_instruction_dataset_file(path),
+                train_samples=2,
+                eval_samples=1,
+                seed=20260624,
+            )
+        self.assertEqual(len(rows["train"]), 2)
+        self.assertEqual(len(rows["eval"]), 1)
+        self.assertTrue(all(row["instruction"] for row in rows["train"] + rows["eval"]))
+
+    def test_real_sft_truncation_keeps_response_labels(self) -> None:
+        prompt_ids = list(range(100))
+        response_ids = [200, 201, 202, 203]
+        prompt, response = truncate_for_supervised_response(
+            prompt_ids,
+            response_ids,
+            max_seq_length=8,
+        )
+        self.assertEqual(len(prompt) + len(response), 8)
+        self.assertEqual(response, response_ids)
 
     def test_torch_smoke_backend_materializes_when_torch_is_available(self) -> None:
         try:
