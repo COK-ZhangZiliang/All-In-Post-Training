@@ -37,6 +37,11 @@ from all_in_post_training.pipeline.distributed_sft import (
     render_loss_curve_svg,
     write_loss_artifacts,
 )
+from all_in_post_training.pipeline.real_sft import (
+    format_prompt,
+    normalize_instruction_row,
+    render_real_sft_curve_svg,
+)
 from all_in_post_training.pipeline.runner import PipelineRunner
 
 
@@ -337,6 +342,32 @@ class PipelineConfigTest(unittest.TestCase):
                 Path(directory, "loss_history.csv").read_text(encoding="utf-8").splitlines()[0],
                 "step,epoch,loss,local_loss,grad_norm",
             )
+
+    def test_real_sft_formats_rows_and_metric_curve(self) -> None:
+        row = normalize_instruction_row(
+            {
+                "instruction": "Summarize the text.",
+                "context": "A short article.",
+                "response": "A brief summary.",
+                "category": "summarization",
+            }
+        )
+        self.assertIn("### Instruction:", format_prompt(row))
+        self.assertIn("### Input:", format_prompt(row))
+        svg = render_real_sft_curve_svg(
+            train_history=[
+                {"step": 1, "train_loss": 3.0},
+                {"step": 2, "train_loss": 2.0},
+            ],
+            eval_history=[
+                {"step": 0, "eval_loss": 3.4},
+                {"step": 2, "eval_loss": 2.1},
+            ],
+            run_id="unit-real-sft",
+        )
+        self.assertIn("<svg", svg)
+        self.assertIn("unit-real-sft", svg)
+        self.assertIn("final_eval_loss=2.100000", svg)
 
     def test_torch_smoke_backend_materializes_when_torch_is_available(self) -> None:
         try:
