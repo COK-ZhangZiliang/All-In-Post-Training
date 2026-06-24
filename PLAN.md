@@ -533,6 +533,27 @@ Remaining scope:
 - Add an optional tiny real SFT runner that uses installed TRL/Transformers/Datasets when they are present.
 - Add artifact emission for real trainer logs, package versions, effective config, checkpoint marker, and failure reasons.
 
+### P2.3 - Distributed Fixture SFT
+
+Status: in progress
+
+Objective: validate that two GPU containers can run one coordinated SFT training job before attempting large-model or unapproved-data training.
+
+Implementation slice:
+
+- Add a pure PyTorch distributed SFT fixture trainer that works with `torchrun`.
+- Use one GPU per container and DDP gradient synchronization.
+- Keep the model tiny and local so no external model or dataset download is required.
+- Save rank0 checkpoint, trainer state, and the fixture SFT data under ignored `runs/`.
+- Use this as the distributed systems smoke before real Qwen or TRL training.
+
+Acceptance criteria:
+
+- Two containers can reach the rank0 rendezvous IP and port.
+- `torchrun --nnodes=2 --nproc-per-node=1` completes with world size 2.
+- Rank0 writes `model_state.pt`, `trainer_state.json`, and `sft_fixture.json`.
+- The trainer state records `distributed == true`, `world_size == 2`, and a finite final loss.
+
 ### P3 - Reward and Agentic Rollout Layer
 
 Status: planned

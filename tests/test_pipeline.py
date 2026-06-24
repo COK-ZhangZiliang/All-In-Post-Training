@@ -32,6 +32,7 @@ from all_in_post_training.pipeline.config import (
     load_pipeline_config,
     parse_pipeline_config,
 )
+from all_in_post_training.pipeline.distributed_sft import _encode_example
 from all_in_post_training.pipeline.runner import PipelineRunner
 
 
@@ -310,6 +311,11 @@ class PipelineConfigTest(unittest.TestCase):
             self.assertTrue(result.report_path.exists())
             self.assertEqual(result.report["requirements"]["require_training_extras"], True)
             self.assertIn("training_extras", result.report["missing"])
+
+    def test_distributed_sft_fixture_encoding_is_fixed_length(self) -> None:
+        tokens = _encode_example("Hello", "World", sequence_length=16)
+        self.assertEqual(len(tokens), 16)
+        self.assertTrue(all(0 <= token <= 257 for token in tokens))
 
     def test_torch_smoke_backend_materializes_when_torch_is_available(self) -> None:
         try:
