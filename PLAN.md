@@ -779,13 +779,50 @@ Current notes:
     - `runs/sft-comparison-zero3-smoke.json`
     - `runs/sft-comparison-zero3-smoke.csv`
     - best final eval run in the matched smoke report: `zero3-full-2048-smoke`
+- Matched two-node 20-step LoRA vs full comparison on 2026-06-25:
+  - Code commit: `ee9a409`.
+  - Shared setup:
+    - model: `Qwen/Qwen3.5-2B-Base`
+    - model/data source: ModelScope
+    - dataset file: `qwen3_32b_distill_1k.jsonl`
+    - train/eval samples: 80 / 20
+    - max sequence length: 2048
+    - backend: `gloo`
+    - gradient sync: `deepspeed-zero3`
+    - world size: 2
+    - eval cadence: every 5 optimizer steps
+  - LoRA run:
+    - run id: `zero3-lora-2048-20`
+    - learning rate: `5e-5`
+    - checkpoint policy: `final`
+    - trainable parameters: `5,455,872`
+    - initial eval loss: `0.957493`
+    - final eval loss: `0.922231`
+    - best eval loss: `0.922231`
+    - final eval delta: `-0.035262`
+    - duration: `320.873` seconds
+  - Full-SFT run:
+    - run id: `zero3-full-2048-20-metrics`
+    - learning rate: `5e-6`
+    - checkpoint policy: `none` because full ZeRO-3 checkpoint save exceeded the 30GB container disk
+    - trainable parameters: `1,881,825,088`
+    - initial eval loss: `0.957493`
+    - final eval loss: `0.927063`
+    - best eval loss: `0.924776`
+    - final eval delta: `-0.030430`
+    - duration: `505.642` seconds
+  - Generated comparison report on rank0:
+    - `runs/sft-comparison-zero3-20.json`
+    - `runs/sft-comparison-zero3-20.csv`
+    - best final eval run: `zero3-lora-2048-20`
+  - Interpretation: both modes improved validation loss over the same short window. LoRA was faster, used far fewer trainable parameters, saved a checkpoint successfully, and had the better final eval loss in this 20-step comparison. Full-SFT reached a slightly better intermediate best eval than its final eval but requires a larger disk or artifact store for checkpoint persistence.
 - If the two-container network cannot support DeepSpeed collectives, keep the code path and artifact plan intact, record the failure, and fall back to the existing CPU all-reduce path only for LoRA validation.
 
 Next execution steps:
 
-- Run a matched LoRA vs full comparison with the same larger sample counts and step budget. Recommended first target: 80 train / 20 eval examples, 20 optimizer steps, `--max-seq-length 2048`, LoRA learning rate `5e-5`, full-SFT learning rate `5e-6`.
 - First full-SFT 20-step attempt reached the final checkpoint save, then failed with `OSError: [Errno 28] No space left on device` while DeepSpeed wrote the full ZeRO-3 checkpoint. The runner now writes metrics before checkpoint save and supports `--checkpoint-policy none` for disk-constrained comparison runs.
-- If the matched full-SFT 20-step run is stable, scale both modes to the full 1,000-example `qwen3_32b_distill_1k.jsonl` file for 3 epochs.
+- Scale LoRA first to the full 1,000-example `qwen3_32b_distill_1k.jsonl` file for 3 epochs, keeping `--max-seq-length 2048`, because LoRA is currently the faster and checkpointable baseline.
+- Run full-SFT on the same 1,000-example file only after assigning a larger disk or external artifact directory for ZeRO-3 checkpoints. Until then, use `--checkpoint-policy none` for metrics-only full-SFT comparison windows.
 - If full-SFT 20-step is too slow, keep LoRA as the development baseline and reserve full-SFT for a larger GPU allocation or additional containers.
 - Investigate NCCL separately; current distributed training works through Gloo, but NCCL would be needed for higher throughput.
 
