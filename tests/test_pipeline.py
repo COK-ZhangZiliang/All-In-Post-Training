@@ -40,6 +40,8 @@ from all_in_post_training.pipeline.distributed_sft import (
 )
 from all_in_post_training.pipeline.real_sft import (
     build_deepspeed_zero3_config,
+    build_sft_examples,
+    collate_sft_examples,
     format_prompt,
     load_instruction_dataset_file,
     load_instruction_rows,
@@ -426,6 +428,33 @@ class PipelineConfigTest(unittest.TestCase):
         )
         self.assertEqual(len(prompt) + len(response), 8)
         self.assertEqual(response, response_ids)
+
+    def test_real_sft_collator_uses_dynamic_padding(self) -> None:
+        examples = [
+            {"input_ids": [1, 2, 3], "labels": [-100, 2, 3]},
+            {"input_ids": [4, 5], "labels": [-100, 5]},
+        ]
+        batch = collate_sft_examples(examples, pad_token_id=0)
+        self.assertEqual(tuple(batch["input_ids"].shape), (2, 3))
+        self.assertEqual(batch["attention_mask"].tolist(), [[1, 1, 1], [1, 1, 0]])
+        fixed = collate_sft_examples(examples, pad_token_id=0, pad_to=8)
+        self.assertEqual(tuple(fixed["input_ids"].shape), (2, 8))
+
+    def test_real_sft_examples_keep_variable_lengths_before_collation(self) -> None:
+        class TinyTokenizer:
+            eos_token = "<eos>"
+            pad_token_id = 0
+
+            def __call__(self, text: str, add_special_tokens: bool = False) -> dict[str, list[int]]:
+                del add_special_tokens
+                return {"input_ids": list(range(1, len(text.split()) + 1))}
+
+        rows = [
+            {"instruction": "short", "context": "", "response": "brief answer"},
+            {"instruction": "a much longer prompt", "context": "", "response": "brief answer"},
+        ]
+        examples = build_sft_examples(TinyTokenizer(), rows, max_seq_length=32)
+        self.assertNotEqual(len(examples[0]["input_ids"]), len(examples[1]["input_ids"]))
 
     def test_real_sft_rolling_average_points(self) -> None:
         self.assertEqual(

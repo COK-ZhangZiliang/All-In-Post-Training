@@ -749,6 +749,10 @@ Current notes:
 
 - The previous single-GPU LoRA run improved validation loss from `1.065387` to `0.927737` on a 200-example held-out slice at sequence length 512.
 - The earlier noisy train-loss plot was caused by per-step microbatch loss spikes; current plots use an 8-step moving average for train loss and aggregate eval loss for evaluation.
+- First two-node ZeRO-3 smoke findings on 2026-06-25:
+  - NCCL backend reached DeepSpeed model broadcast and failed with `ncclUnhandledCudaError: invalid argument` across the two containers.
+  - Gloo backend reached the first forward pass but OOMed at sequence length 2048 because the runner padded every sample to the global max sequence length.
+  - Fix in progress: switch training/eval DataLoaders to dynamic per-batch padding while keeping `--max-seq-length 2048` as the truncation ceiling.
 - If the two-container network cannot support DeepSpeed collectives, keep the code path and artifact plan intact, record the failure, and fall back to the existing CPU all-reduce path only for LoRA validation.
 
 ### P3 - Reward and Agentic Rollout Layer

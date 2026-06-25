@@ -136,7 +136,7 @@ def run_real_sft(
 ) -> dict[str, Any]:
     import torch
     import torch.distributed as dist
-    from torch.utils.data import DataLoader, DistributedSampler, TensorDataset
+    from torch.utils.data import DataLoader, DistributedSampler
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -199,11 +199,8 @@ def run_real_sft(
         eval_samples=eval_samples,
         seed=seed,
     )
-    train_tensors = build_sft_dataset(tokenizer, rows["train"], max_seq_length)
-    eval_tensors = build_sft_dataset(tokenizer, rows["eval"], max_seq_length)
-
-    train_dataset = TensorDataset(*train_tensors)
-    eval_dataset = TensorDataset(*eval_tensors)
+    train_dataset = build_sft_examples(tokenizer, rows["train"], max_seq_length)
+    eval_dataset = build_sft_examples(tokenizer, rows["eval"], max_seq_length)
     train_sampler = DistributedSampler(
         train_dataset,
         num_replicas=world_size,
@@ -218,8 +215,18 @@ def run_real_sft(
         shuffle=False,
         drop_last=False,
     )
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler)
-    eval_loader = DataLoader(eval_dataset, batch_size=batch_size, sampler=eval_sampler)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=train_sampler,
+        collate_fn=lambda batch: collate_sft_examples(batch, pad_token_id=int(tokenizer.pad_token_id)),
+    )
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=batch_size,
+        sampler=eval_sampler,
+        collate_fn=lambda batch: collate_sft_examples(batch, pad_token_id=int(tokenizer.pad_token_id)),
+    )
 
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     model_engine = None
@@ -267,11 +274,11 @@ def run_real_sft(
     )
     for epoch in range(epochs):
         train_sampler.set_epoch(epoch)
-        for input_ids, attention_mask, labels in train_loader:
+        for batch in train_loader:
             step += 1
-            input_ids = input_ids.to(device)
-            attention_mask = attention_mask.to(device)
-            labels = labels.to(device)
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
             if model_engine is not None:
@@ -568,11 +575,19 @@ def format_prompt(row: dict[str, str]) -> str:
 def build_sft_dataset(tokenizer: Any, rows: list[dict[str, str]], max_seq_length: int) -> tuple[Any, Any, Any]:
     import torch
 
+    examples = build_sft_examples(tokenizer, rows, max_seq_length)
+    padded = collate_sft_examples(examples, pad_token_id=int(tokenizer.pad_token_id), pad_to=max_seq_length)
+    return padded["input_ids"], padded["attention_mask"], padded["labels"]
+
+
+def build_sft_examples(
+    tokenizer: Any,
+    rows: list[dict[str, str]],
+    max_seq_length: int,
+) -> list[dict[str, list[int]]]:
     input_ids: list[list[int]] = []
-    attention_masks: list[list[int]] = []
     labels: list[list[int]] = []
     eos = tokenizer.eos_token or ""
-    pad_id = int(tokenizer.pad_token_id)
     for row in rows:
         prompt_ids = tokenizer(format_prompt(row), add_special_tokens=False)["input_ids"]
         response_ids = tokenizer(row["response"] + eos, add_special_tokens=False)["input_ids"]
@@ -583,20 +598,46 @@ def build_sft_dataset(tokenizer: Any, rows: list[dict[str, str]], max_seq_length
         )
         ids = prompt_ids + response_ids
         row_labels = ([-100] * len(prompt_ids)) + response_ids
-        attention = [1] * len(ids)
-        padding = max_seq_length - len(ids)
-        if padding > 0:
-            ids.extend([pad_id] * padding)
-            row_labels.extend([-100] * padding)
-            attention.extend([0] * padding)
         input_ids.append(ids)
         labels.append(row_labels)
-        attention_masks.append(attention)
-    return (
-        torch.tensor(input_ids, dtype=torch.long),
-        torch.tensor(attention_masks, dtype=torch.long),
-        torch.tensor(labels, dtype=torch.long),
-    )
+    return [
+        {
+            "input_ids": ids,
+            "labels": row_labels,
+        }
+        for ids, row_labels in zip(input_ids, labels)
+    ]
+
+
+def collate_sft_examples(
+    examples: list[dict[str, list[int]]],
+    *,
+    pad_token_id: int,
+    pad_to: int | None = None,
+) -> dict[str, Any]:
+    import torch
+
+    if not examples:
+        raise ValueError("cannot collate an empty SFT batch")
+    max_length = pad_to or max(len(example["input_ids"]) for example in examples)
+    input_ids: list[list[int]] = []
+    attention_masks: list[list[int]] = []
+    labels: list[list[int]] = []
+    for example in examples:
+        ids = list(example["input_ids"])
+        row_labels = list(example["labels"])
+        if len(ids) > max_length:
+            ids = ids[:max_length]
+            row_labels = row_labels[:max_length]
+        padding = max_length - len(ids)
+        input_ids.append(ids + ([pad_token_id] * padding))
+        attention_masks.append(([1] * len(ids)) + ([0] * padding))
+        labels.append(row_labels + ([-100] * padding))
+    return {
+        "input_ids": torch.tensor(input_ids, dtype=torch.long),
+        "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
+        "labels": torch.tensor(labels, dtype=torch.long),
+    }
 
 
 def truncate_for_supervised_response(
@@ -630,10 +671,10 @@ def evaluate_model(
     total_loss = torch.tensor(0.0, device=device)
     total_tokens = torch.tensor(0.0, device=device)
     with torch.no_grad():
-        for input_ids, attention_mask, labels in loader:
-            input_ids = input_ids.to(device)
-            attention_mask = attention_mask.to(device)
-            labels = labels.to(device)
+        for batch in loader:
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             token_count = (labels != -100).sum().to(dtype=torch.float32)
             if int(token_count.cpu().item()) == 0:
