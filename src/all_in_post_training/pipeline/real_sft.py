@@ -474,7 +474,7 @@ def run_real_sft(
         output_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_dir = output_dir / "model"
         model_engine.save_checkpoint(str(checkpoint_dir), tag="global_step_final")
-    elif checkpoint_policy != "none":
+    elif checkpoint_policy not in {"final", "none"}:
         raise ValueError(f"unsupported checkpoint policy: {checkpoint_policy}")
 
     if distributed:
