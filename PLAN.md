@@ -697,6 +697,60 @@ Follow-up plan:
 - Scale data from `swift/Qwen3-SFT-Mixin` to a license-reviewed ModelScope mixture, likely starting with selected shards from `swift/swift-sft-mixture` or `AI-ModelScope/tulu-3-sft-mixture`.
 - Keep all future model and dataset downloads on ModelScope by default, with exceptions documented in run metadata.
 
+### P2.7 - Two-GPU Zero3 SFT at 2048 Tokens
+
+Status: in progress
+
+Objective: complete the next real SFT iteration on the GPU containers with a larger ModelScope dataset slice, 2048-token training examples, two-GPU acceleration, DeepSpeed ZeRO-3, and a direct LoRA-vs-full SFT comparison.
+
+Implementation scope:
+
+- Extend the real SFT runner so `--tuning-mode` supports both `lora` and `full`.
+- Add `--gradient-sync deepspeed-zero3` for distributed runs, using ZeRO stage 3 with CPU optimizer and parameter offload.
+- Keep `Qwen/Qwen3.5-2B-Base` and SFT datasets resolved through ModelScope by default.
+- Keep `--max-seq-length 2048` as the target sequence length. If memory is unstable, reduce per-rank batch size first and keep sequence length fixed before requesting more containers.
+- Add an SFT comparison utility that reads multiple `trainer_state.json` files and writes JSON/CSV reports with tuning mode, world size, sequence length, trainable parameters, initial/final eval loss, best eval loss, and final eval delta.
+
+Execution plan:
+
+- Sync the updated repository to both GPU containers through GitHub.
+- Verify both containers have the same commit, Python environment, CUDA visibility, ModelScope cache policy, and DeepSpeed installation.
+- Launch a short two-node ZeRO-3 smoke run first:
+  - model: `Qwen/Qwen3.5-2B-Base`
+  - dataset: ModelScope SFT mixture file already normalized under `data/raw/modelscope/`
+  - sequence length: `2048`
+  - tuning mode: `lora`
+  - max steps: a small value only to verify distributed startup, forward/backward, evaluation, and artifact writing
+- Launch the main LoRA SFT run:
+  - two GPU containers, one GPU process per container
+  - `--gradient-sync deepspeed-zero3`
+  - `--max-seq-length 2048`
+  - 3 epochs when runtime allows, otherwise record the exact completed step budget
+  - evaluation at fixed intervals using the same held-out slice
+- Launch a matched full-SFT run after the LoRA run:
+  - same model, dataset file, sample counts, split seed, max sequence length, evaluation cadence, and learning-rate family
+  - use ZeRO-3 CPU offload
+  - if full SFT is too slow or unstable, finish a shorter but explicitly matched comparison window and record the blocker
+- Generate the comparison report with `python -m all_in_post_training.pipeline.sft_compare`.
+
+Exit evidence:
+
+- Local unit tests pass after the Zero3 and comparison-tool changes: `PYTHONPATH=src python3 -m unittest tests.test_pipeline` passed 24 tests on 2026-06-25.
+- GPU artifacts to collect for both LoRA and full runs:
+  - `trainer_state.json`
+  - `eval_history.csv`
+  - `train_history.csv`
+  - `sft_eval_curve.svg`
+  - `dataset_preview.json`
+  - DeepSpeed checkpoint directory for full SFT or adapter directory for LoRA
+- The comparison report must show whether validation loss improved from step 0 for each mode and which mode has the better final held-out loss.
+
+Current notes:
+
+- The previous single-GPU LoRA run improved validation loss from `1.065387` to `0.927737` on a 200-example held-out slice at sequence length 512.
+- The earlier noisy train-loss plot was caused by per-step microbatch loss spikes; current plots use an 8-step moving average for train loss and aggregate eval loss for evaluation.
+- If the two-container network cannot support DeepSpeed collectives, keep the code path and artifact plan intact, record the failure, and fall back to the existing CPU all-reduce path only for LoRA validation.
+
 ### P3 - Reward and Agentic Rollout Layer
 
 Status: planned

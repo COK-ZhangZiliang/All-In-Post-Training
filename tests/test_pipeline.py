@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,6 +39,7 @@ from all_in_post_training.pipeline.distributed_sft import (
     write_loss_artifacts,
 )
 from all_in_post_training.pipeline.real_sft import (
+    build_deepspeed_zero3_config,
     format_prompt,
     load_instruction_dataset_file,
     load_instruction_rows,
@@ -46,6 +48,7 @@ from all_in_post_training.pipeline.real_sft import (
     rolling_average_points,
     truncate_for_supervised_response,
 )
+from all_in_post_training.pipeline.sft_compare import build_sft_comparison, write_sft_comparison_csv
 from all_in_post_training.pipeline.runner import PipelineRunner
 
 
@@ -429,6 +432,59 @@ class PipelineConfigTest(unittest.TestCase):
             rolling_average_points([(1, 2.0), (2, 4.0), (3, 6.0)], window=2),
             [(1, 2.0), (2, 3.0), (3, 5.0)],
         )
+
+    def test_real_sft_zero3_config_uses_stage_three_offload(self) -> None:
+        config = build_deepspeed_zero3_config(batch_size=1, world_size=2, learning_rate=5e-5)
+        self.assertEqual(config["train_batch_size"], 2)
+        self.assertEqual(config["zero_optimization"]["stage"], 3)
+        self.assertEqual(config["zero_optimization"]["offload_optimizer"]["device"], "cpu")
+        self.assertEqual(config["optimizer"]["params"]["lr"], 5e-5)
+
+    def test_sft_comparison_summarizes_lora_and_full_runs(self) -> None:
+        lora = {
+            "run_id": "lora-run",
+            "tuning_mode": "lora",
+            "gradient_sync": "deepspeed-zero3",
+            "world_size": 2,
+            "model_name": "Qwen/Qwen3.5-2B-Base",
+            "dataset_name": "swift/Qwen3-SFT-Mixin",
+            "train_samples": 100,
+            "eval_samples": 20,
+            "max_seq_length": 2048,
+            "steps": 10,
+            "epochs": 1,
+            "learning_rate": 5e-5,
+            "lora": {"trainable_parameters": 1000},
+            "train_history": [{"step": 10, "train_loss": 1.8}],
+            "eval_history": [
+                {"step": 0, "eval_loss": 2.4},
+                {"step": 10, "eval_loss": 2.0},
+            ],
+            "duration_seconds": 12.0,
+        }
+        full = {
+            **lora,
+            "run_id": "full-run",
+            "tuning_mode": "full",
+            "lora": {"trainable_parameters": 2_000_000_000},
+            "eval_history": [
+                {"step": 0, "eval_loss": 2.4},
+                {"step": 10, "eval_loss": 1.9},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            lora_path = Path(directory) / "lora" / "trainer_state.json"
+            full_path = Path(directory) / "full" / "trainer_state.json"
+            lora_path.parent.mkdir()
+            full_path.parent.mkdir()
+            lora_path.write_text(json.dumps(lora), encoding="utf-8")
+            full_path.write_text(json.dumps(full), encoding="utf-8")
+            comparison = build_sft_comparison([lora_path, full_path.parent])
+            self.assertEqual(comparison["best_final_eval_run"], "full-run")
+            self.assertEqual(comparison["runs"][0]["final_eval_delta"], -0.3999999999999999)
+            csv_path = Path(directory) / "comparison.csv"
+            write_sft_comparison_csv(csv_path, comparison["runs"])
+            self.assertIn("tuning_mode", csv_path.read_text(encoding="utf-8").splitlines()[0])
 
     def test_torch_smoke_backend_materializes_when_torch_is_available(self) -> None:
         try:

@@ -16,7 +16,7 @@ QWEN_MODELSCOPE_MODEL = "Qwen/Qwen3.5-2B-Base"
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run LoRA SFT on a real causal LM and real instruction data"
+        description="Run LoRA or full-parameter SFT on a real causal LM and real instruction data"
     )
     parser.add_argument("--output-dir", required=True, help="Output directory for rank0 artifacts")
     parser.add_argument("--run-id", default="real-sft", help="Run id for reports")
@@ -47,6 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch-size", type=int, default=1, help="Per-rank batch size")
     parser.add_argument("--learning-rate", type=float, default=2e-4, help="AdamW learning rate")
     parser.add_argument("--eval-every", type=int, default=8, help="Optimizer-step eval interval")
+    parser.add_argument(
+        "--tuning-mode",
+        choices=("lora", "full"),
+        default="lora",
+        help="Whether to train LoRA adapters or all model parameters",
+    )
     parser.add_argument("--lora-r", type=int, default=8, help="LoRA rank")
     parser.add_argument("--lora-alpha", type=int, default=16, help="LoRA alpha")
     parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout")
@@ -58,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backend", default="gloo", help="Torch distributed backend")
     parser.add_argument(
         "--gradient-sync",
-        choices=("none", "cpu-allreduce"),
+        choices=("none", "cpu-allreduce", "deepspeed-zero3"),
         default="cpu-allreduce",
         help="Gradient synchronization strategy for distributed runs",
     )
@@ -80,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=max(1, args.batch_size),
         learning_rate=args.learning_rate,
         eval_every=max(1, args.eval_every),
+        tuning_mode=args.tuning_mode,
         lora_r=max(1, args.lora_r),
         lora_alpha=max(1, args.lora_alpha),
         lora_dropout=args.lora_dropout,
@@ -119,6 +126,7 @@ def run_real_sft(
     batch_size: int,
     learning_rate: float,
     eval_every: int,
+    tuning_mode: str,
     lora_r: int,
     lora_alpha: int,
     lora_dropout: float,
@@ -130,14 +138,14 @@ def run_real_sft(
     import torch.distributed as dist
     from torch.utils.data import DataLoader, DistributedSampler, TensorDataset
 
-    from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    if distributed:
+    use_deepspeed = gradient_sync == "deepspeed-zero3"
+    if distributed and not use_deepspeed:
         dist.init_process_group(backend=backend)
 
     cuda_available = bool(torch.cuda.is_available())
@@ -163,15 +171,20 @@ def run_real_sft(
         model.config.use_cache = False
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
-    lora_config = LoraConfig(
-        r=lora_r,
-        lora_alpha=lora_alpha,
-        lora_dropout=lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=list(lora_target_modules),
-    )
-    model = get_peft_model(model, lora_config)
+    if tuning_mode == "lora":
+        from peft import LoraConfig, get_peft_model
+
+        lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules=list(lora_target_modules),
+        )
+        model = get_peft_model(model, lora_config)
+    elif tuning_mode != "full":
+        raise ValueError(f"unsupported tuning mode: {tuning_mode}")
     model.to(device)
     model.train()
 
@@ -209,7 +222,30 @@ def run_real_sft(
     eval_loader = DataLoader(eval_dataset, batch_size=batch_size, sampler=eval_sampler)
 
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_parameters, lr=learning_rate)
+    model_engine = None
+    if use_deepspeed:
+        import deepspeed
+
+        disable_deepspeed_nvtx_if_needed(deepspeed)
+        deepspeed.init_distributed(dist_backend=backend)
+        trainable_parameter_count = int(
+            sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        )
+        deepspeed_config = build_deepspeed_zero3_config(
+            batch_size=batch_size,
+            world_size=world_size,
+            learning_rate=learning_rate,
+        )
+        model_engine, _, _, _ = deepspeed.initialize(
+            model=model,
+            model_parameters=trainable_parameters,
+            config=deepspeed_config,
+        )
+        model = model_engine
+        dist = torch.distributed
+    else:
+        trainable_parameter_count = int(sum(parameter.numel() for parameter in trainable_parameters))
+        optimizer = torch.optim.AdamW(trainable_parameters, lr=learning_rate)
 
     start = time.time()
     train_history: list[dict[str, Any]] = []
@@ -238,12 +274,17 @@ def run_real_sft(
             labels = labels.to(device)
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            if distributed and gradient_sync == "cpu-allreduce":
-                average_trainable_gradients_via_cpu(torch, dist, model, world_size)
-            grad_norm = torch.nn.utils.clip_grad_norm_(trainable_parameters, max_norm=1.0)
-            optimizer.step()
+            if model_engine is not None:
+                model_engine.backward(loss)
+                model_engine.step()
+                grad_norm = 0.0
+            else:
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                if distributed and gradient_sync == "cpu-allreduce":
+                    average_trainable_gradients_via_cpu(torch, dist, model, world_size)
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_parameters, max_norm=1.0)
+                optimizer.step()
 
             reduced_loss = loss.detach().clone()
             if distributed:
@@ -317,12 +358,13 @@ def run_real_sft(
         "max_steps": max_steps,
         "batch_size": batch_size,
         "learning_rate": learning_rate,
+        "tuning_mode": tuning_mode,
         "lora": {
             "r": lora_r,
             "alpha": lora_alpha,
             "dropout": lora_dropout,
             "target_modules": list(lora_target_modules),
-            "trainable_parameters": int(sum(parameter.numel() for parameter in trainable_parameters)),
+            "trainable_parameters": trainable_parameter_count,
         },
         "steps": step,
         "duration_seconds": round(time.time() - start, 3),
@@ -330,10 +372,16 @@ def run_real_sft(
         "eval_history": eval_history,
     }
 
+    if model_engine is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_dir = output_dir / "model"
+        model_engine.save_checkpoint(str(checkpoint_dir), tag="global_step_final")
+
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
-        adapter_dir = output_dir / "adapter"
-        model.save_pretrained(adapter_dir)
+        checkpoint_dir = output_dir / ("adapter" if tuning_mode == "lora" else "model")
+        if model_engine is None:
+            model.save_pretrained(checkpoint_dir)
         tokenizer.save_pretrained(output_dir / "tokenizer")
         write_real_sft_artifacts(output_dir, report)
         (output_dir / "dataset_preview.json").write_text(
@@ -353,6 +401,43 @@ def run_real_sft(
         dist.barrier()
         dist.destroy_process_group()
     return report
+
+
+def build_deepspeed_zero3_config(*, batch_size: int, world_size: int, learning_rate: float) -> dict[str, Any]:
+    return {
+        "train_micro_batch_size_per_gpu": batch_size,
+        "train_batch_size": batch_size * world_size,
+        "gradient_accumulation_steps": 1,
+        "gradient_clipping": 1.0,
+        "bf16": {"enabled": True},
+        "zero_optimization": {
+            "stage": 3,
+            "offload_optimizer": {"device": "cpu", "pin_memory": True},
+            "offload_param": {"device": "cpu", "pin_memory": True},
+            "overlap_comm": False,
+            "contiguous_gradients": True,
+            "stage3_gather_16bit_weights_on_model_save": False,
+        },
+        "optimizer": {
+            "type": "AdamW",
+            "params": {
+                "lr": learning_rate,
+                "betas": [0.9, 0.999],
+                "eps": 1e-8,
+                "weight_decay": 0.0,
+            },
+        },
+        "steps_per_print": 100000,
+        "wall_clock_breakdown": False,
+    }
+
+
+def disable_deepspeed_nvtx_if_needed(deepspeed: Any) -> None:
+    nvtx = getattr(getattr(deepspeed, "utils", None), "nvtx", None)
+    if nvtx is None:
+        return
+    nvtx._range_push = lambda *args, **kwargs: None
+    nvtx._range_pop = lambda *args, **kwargs: None
 
 
 def resolve_model_path(model_name: str, model_source: str) -> str:
