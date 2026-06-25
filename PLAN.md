@@ -816,14 +816,65 @@ Current notes:
     - `runs/sft-comparison-zero3-20.csv`
     - best final eval run: `zero3-lora-2048-20`
   - Interpretation: both modes improved validation loss over the same short window. LoRA was faster, used far fewer trainable parameters, saved a checkpoint successfully, and had the better final eval loss in this 20-step comparison. Full-SFT reached a slightly better intermediate best eval than its final eval but requires a larger disk or artifact store for checkpoint persistence.
+- Full 3-epoch SFT comparison on 2026-06-26:
+  - Code commits used:
+    - Scheduler implementation: `5ac9801`
+    - Tokenizer truncation/progress logging: `9ab7553`
+    - Flattened CPU all-reduce and train progress logging: `3f68c86`
+    - Non-DeepSpeed final checkpoint-policy fix after LoRA completed: `6e0b074`
+  - Shared setup:
+    - model: `Qwen/Qwen3.5-2B-Base`
+    - model/data source: ModelScope
+    - dataset file: `qwen3_32b_distill_1k.jsonl`
+    - train/eval samples: 800 / 200
+    - max sequence length: 2048
+    - epochs: 3
+    - planned optimizer steps: 1200
+    - learning rate: `1e-5`
+    - warmup ratio: `0.1`
+    - warmup steps: 120
+    - scheduler: cosine
+    - world size: 2
+  - LoRA run:
+    - run id: `cpuallreduce-lora-2048-3epoch-lr1e-5-flat`
+    - gradient sync: flattened `cpu-allreduce`
+    - checkpoint policy: `final`
+    - trainable parameters: `5,455,872`
+    - initial eval loss: `0.930094`
+    - final eval loss: `0.862063`
+    - best eval loss: `0.862063`
+    - final eval delta: `-0.068031`
+    - final train loss: `0.900577`
+    - duration: `2777.130` seconds
+    - local plot copy: `runs/plots/lora-3epoch-lr1e-5.svg`
+  - Full-SFT run:
+    - run id: `zero3-full-2048-3epoch-lr1e-5-metrics`
+    - gradient sync: `deepspeed-zero3`
+    - checkpoint policy: `none` because full ZeRO-3 checkpoints exceed the current 30GB container disk
+    - trainable parameters: `1,881,825,088`
+    - initial eval loss: `0.930094`
+    - final eval loss: `1.137491`
+    - best eval loss: `0.912458`
+    - final eval delta: `+0.207397`
+    - final train loss: `0.119953`
+    - duration: `22024.616` seconds
+    - local plot copy: `runs/plots/full-3epoch-lr1e-5.svg`
+  - Generated local comparison report:
+    - `runs/remote/sft-comparison-3epoch-lr1e-5.json`
+    - `runs/remote/sft-comparison-3epoch-lr1e-5.csv`
+    - best final eval run: `cpuallreduce-lora-2048-3epoch-lr1e-5-flat`
+  - Interpretation:
+    - LoRA is the current SFT baseline: it improved held-out loss monotonically enough to finish at the best eval point, trained much faster, and saved an adapter checkpoint.
+    - Full-SFT overfit or destabilized at `lr=1e-5`: train loss collapsed to `0.119953`, but held-out loss worsened from `0.930094` to `1.137491`. Its best eval loss appeared mid-run, so full-SFT needs lower LR, stronger regularization, best-checkpoint selection, or early stopping before it should be used as the baseline.
 - If the two-container network cannot support DeepSpeed collectives, keep the code path and artifact plan intact, record the failure, and fall back to the existing CPU all-reduce path only for LoRA validation.
 
 Next execution steps:
 
 - First full-SFT 20-step attempt reached the final checkpoint save, then failed with `OSError: [Errno 28] No space left on device` while DeepSpeed wrote the full ZeRO-3 checkpoint. The runner now writes metrics before checkpoint save and supports `--checkpoint-policy none` for disk-constrained comparison runs.
-- Scale LoRA first to the full 1,000-example `qwen3_32b_distill_1k.jsonl` file for 3 epochs, keeping `--max-seq-length 2048`, because LoRA is currently the faster and checkpointable baseline.
-- Run full-SFT on the same 1,000-example file only after assigning a larger disk or external artifact directory for ZeRO-3 checkpoints. Until then, use `--checkpoint-policy none` for metrics-only full-SFT comparison windows.
-- If full-SFT 20-step is too slow, keep LoRA as the development baseline and reserve full-SFT for a larger GPU allocation or additional containers.
+- Treat `cpuallreduce-lora-2048-3epoch-lr1e-5-flat` as the current SFT baseline for the next RL/OPD work.
+- Add best-eval checkpoint selection and early stopping before another full-SFT run.
+- Re-run full-SFT with a lower LR, likely `1e-6` or `2e-6`, and stop on best eval instead of final epoch.
+- Add an external artifact directory or larger disk before saving full ZeRO-3 checkpoints.
 - Investigate NCCL separately; current distributed training works through Gloo, but NCCL would be needed for higher throughput.
 
 ### P3 - Reward and Agentic Rollout Layer
