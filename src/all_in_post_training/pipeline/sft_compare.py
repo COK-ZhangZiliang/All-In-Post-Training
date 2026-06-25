@@ -72,6 +72,7 @@ def summarize_sft_run(state: dict[str, Any]) -> dict[str, Any]:
         "run_id": state.get("run_id"),
         "tuning_mode": state.get("tuning_mode", "lora"),
         "gradient_sync": state.get("gradient_sync"),
+        "checkpoint_policy": state.get("checkpoint_policy", "final"),
         "world_size": state.get("world_size"),
         "model_name": state.get("model_name"),
         "dataset_name": state.get("dataset_name"),

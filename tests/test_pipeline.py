@@ -479,6 +479,7 @@ class PipelineConfigTest(unittest.TestCase):
             "run_id": "lora-run",
             "tuning_mode": "lora",
             "gradient_sync": "deepspeed-zero3",
+            "checkpoint_policy": "none",
             "world_size": 2,
             "model_name": "Qwen/Qwen3.5-2B-Base",
             "dataset_name": "swift/Qwen3-SFT-Mixin",
@@ -515,6 +516,7 @@ class PipelineConfigTest(unittest.TestCase):
             full_path.write_text(json.dumps(full), encoding="utf-8")
             comparison = build_sft_comparison([lora_path, full_path.parent])
             self.assertEqual(comparison["best_final_eval_run"], "full-run")
+            self.assertEqual(comparison["runs"][0]["checkpoint_policy"], "none")
             self.assertEqual(comparison["runs"][0]["final_eval_delta"], -0.3999999999999999)
             csv_path = Path(directory) / "comparison.csv"
             write_sft_comparison_csv(csv_path, comparison["runs"])

@@ -68,6 +68,12 @@ def main(argv: list[str] | None = None) -> int:
         default="cpu-allreduce",
         help="Gradient synchronization strategy for distributed runs",
     )
+    parser.add_argument(
+        "--checkpoint-policy",
+        choices=("final", "none"),
+        default="final",
+        help="Whether to save the final model/adapter checkpoint in addition to metrics",
+    )
     args = parser.parse_args(argv)
 
     report = run_real_sft(
@@ -95,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         backend=args.backend,
         gradient_sync=args.gradient_sync,
+        checkpoint_policy=args.checkpoint_policy,
     )
     if report["rank"] == 0:
         first_eval = report["eval_history"][0]["eval_loss"]
@@ -133,6 +140,7 @@ def run_real_sft(
     lora_target_modules: tuple[str, ...],
     backend: str,
     gradient_sync: str,
+    checkpoint_policy: str,
 ) -> dict[str, Any]:
     import torch
     import torch.distributed as dist
@@ -352,6 +360,7 @@ def run_real_sft(
         "distributed": distributed,
         "backend": backend,
         "gradient_sync": gradient_sync,
+        "checkpoint_policy": checkpoint_policy,
         "device": str(device),
         "cuda_available": cuda_available,
         "model_name": model_name,
@@ -381,16 +390,8 @@ def run_real_sft(
         "eval_history": eval_history,
     }
 
-    if model_engine is not None:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_dir = output_dir / "model"
-        model_engine.save_checkpoint(str(checkpoint_dir), tag="global_step_final")
-
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_dir = output_dir / ("adapter" if tuning_mode == "lora" else "model")
-        if model_engine is None:
-            model.save_pretrained(checkpoint_dir)
         tokenizer.save_pretrained(output_dir / "tokenizer")
         write_real_sft_artifacts(output_dir, report)
         (output_dir / "dataset_preview.json").write_text(
@@ -405,6 +406,16 @@ def run_real_sft(
             + "\n",
             encoding="utf-8",
         )
+        if checkpoint_policy == "final" and model_engine is None:
+            checkpoint_dir = output_dir / ("adapter" if tuning_mode == "lora" else "model")
+            model.save_pretrained(checkpoint_dir)
+
+    if checkpoint_policy == "final" and model_engine is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_dir = output_dir / "model"
+        model_engine.save_checkpoint(str(checkpoint_dir), tag="global_step_final")
+    elif checkpoint_policy != "none":
+        raise ValueError(f"unsupported checkpoint policy: {checkpoint_policy}")
 
     if distributed:
         dist.barrier()

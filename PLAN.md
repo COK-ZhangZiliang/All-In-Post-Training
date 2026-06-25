@@ -784,6 +784,7 @@ Current notes:
 Next execution steps:
 
 - Run a matched LoRA vs full comparison with the same larger sample counts and step budget. Recommended first target: 80 train / 20 eval examples, 20 optimizer steps, `--max-seq-length 2048`, LoRA learning rate `5e-5`, full-SFT learning rate `5e-6`.
+- First full-SFT 20-step attempt reached the final checkpoint save, then failed with `OSError: [Errno 28] No space left on device` while DeepSpeed wrote the full ZeRO-3 checkpoint. The runner now writes metrics before checkpoint save and supports `--checkpoint-policy none` for disk-constrained comparison runs.
 - If the matched full-SFT 20-step run is stable, scale both modes to the full 1,000-example `qwen3_32b_distill_1k.jsonl` file for 3 epochs.
 - If full-SFT 20-step is too slow, keep LoRA as the development baseline and reserve full-SFT for a larger GPU allocation or additional containers.
 - Investigate NCCL separately; current distributed training works through Gloo, but NCCL would be needed for higher throughput.
