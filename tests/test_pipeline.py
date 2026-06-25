@@ -42,6 +42,8 @@ from all_in_post_training.pipeline.real_sft import (
     build_deepspeed_zero3_config,
     build_sft_examples,
     collate_sft_examples,
+    compute_planned_optimizer_steps,
+    compute_scheduled_learning_rate,
     format_prompt,
     load_instruction_dataset_file,
     load_instruction_rows,
@@ -473,6 +475,41 @@ class PipelineConfigTest(unittest.TestCase):
     def test_real_sft_disables_gradient_checkpointing_for_zero3(self) -> None:
         self.assertFalse(should_enable_gradient_checkpointing("deepspeed-zero3"))
         self.assertTrue(should_enable_gradient_checkpointing("cpu-allreduce"))
+
+    def test_real_sft_cosine_schedule_with_warmup(self) -> None:
+        planned = compute_planned_optimizer_steps(steps_per_epoch=50, epochs=3, max_steps=None)
+        self.assertEqual(planned, 150)
+        warmup_steps = int(planned * 0.1)
+        self.assertAlmostEqual(
+            compute_scheduled_learning_rate(
+                step=1,
+                total_steps=planned,
+                base_learning_rate=1e-5,
+                warmup_steps=warmup_steps,
+                schedule="cosine",
+            ),
+            1e-5 / warmup_steps,
+        )
+        self.assertAlmostEqual(
+            compute_scheduled_learning_rate(
+                step=warmup_steps,
+                total_steps=planned,
+                base_learning_rate=1e-5,
+                warmup_steps=warmup_steps,
+                schedule="cosine",
+            ),
+            1e-5,
+        )
+        self.assertAlmostEqual(
+            compute_scheduled_learning_rate(
+                step=planned,
+                total_steps=planned,
+                base_learning_rate=1e-5,
+                warmup_steps=warmup_steps,
+                schedule="cosine",
+            ),
+            0.0,
+        )
 
     def test_sft_comparison_summarizes_lora_and_full_runs(self) -> None:
         lora = {

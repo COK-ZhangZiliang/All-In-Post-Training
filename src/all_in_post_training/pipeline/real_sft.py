@@ -45,7 +45,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional maximum optimizer steps before stopping the run",
     )
     parser.add_argument("--batch-size", type=int, default=1, help="Per-rank batch size")
-    parser.add_argument("--learning-rate", type=float, default=2e-4, help="AdamW learning rate")
+    parser.add_argument("--learning-rate", type=float, default=1e-5, help="Peak AdamW learning rate")
+    parser.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=0.1,
+        help="Fraction of optimizer steps used for linear warmup",
+    )
+    parser.add_argument(
+        "--lr-scheduler",
+        choices=("constant", "cosine"),
+        default="cosine",
+        help="Learning-rate schedule after warmup",
+    )
     parser.add_argument("--eval-every", type=int, default=8, help="Optimizer-step eval interval")
     parser.add_argument(
         "--tuning-mode",
@@ -91,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=max(1, args.max_steps) if args.max_steps is not None else None,
         batch_size=max(1, args.batch_size),
         learning_rate=args.learning_rate,
+        warmup_ratio=max(0.0, min(1.0, args.warmup_ratio)),
+        lr_scheduler=args.lr_scheduler,
         eval_every=max(1, args.eval_every),
         tuning_mode=args.tuning_mode,
         lora_r=max(1, args.lora_r),
@@ -132,6 +146,8 @@ def run_real_sft(
     max_steps: int | None,
     batch_size: int,
     learning_rate: float,
+    warmup_ratio: float,
+    lr_scheduler: str,
     eval_every: int,
     tuning_mode: str,
     lora_r: int,
@@ -264,6 +280,12 @@ def run_real_sft(
         trainable_parameter_count = int(sum(parameter.numel() for parameter in trainable_parameters))
         optimizer = torch.optim.AdamW(trainable_parameters, lr=learning_rate)
 
+    planned_steps = compute_planned_optimizer_steps(
+        steps_per_epoch=len(train_loader),
+        epochs=epochs,
+        max_steps=max_steps,
+    )
+    warmup_steps = int(math.ceil(planned_steps * warmup_ratio)) if warmup_ratio > 0 else 0
     start = time.time()
     train_history: list[dict[str, Any]] = []
     eval_history: list[dict[str, Any]] = []
@@ -286,9 +308,20 @@ def run_real_sft(
         train_sampler.set_epoch(epoch)
         for batch in train_loader:
             step += 1
+            current_lr = compute_scheduled_learning_rate(
+                step=step,
+                total_steps=planned_steps,
+                base_learning_rate=learning_rate,
+                warmup_steps=warmup_steps,
+                schedule=lr_scheduler,
+            )
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
+            if model_engine is not None:
+                set_optimizer_learning_rate(model_engine.optimizer, current_lr)
+            else:
+                set_optimizer_learning_rate(optimizer, current_lr)
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
             if model_engine is not None:
@@ -314,6 +347,7 @@ def run_real_sft(
                     "train_loss": float(reduced_loss.cpu().item()),
                     "local_train_loss": float(loss.detach().cpu().item()),
                     "grad_norm": float(_to_float(grad_norm)),
+                    "learning_rate": current_lr,
                 }
             )
             if step % eval_every == 0:
@@ -376,6 +410,10 @@ def run_real_sft(
         "max_steps": max_steps,
         "batch_size": batch_size,
         "learning_rate": learning_rate,
+        "warmup_ratio": warmup_ratio,
+        "warmup_steps": warmup_steps,
+        "lr_scheduler": lr_scheduler,
+        "planned_steps": planned_steps,
         "tuning_mode": tuning_mode,
         "lora": {
             "r": lora_r,
@@ -450,6 +488,41 @@ def build_deepspeed_zero3_config(*, batch_size: int, world_size: int, learning_r
         "steps_per_print": 100000,
         "wall_clock_breakdown": False,
     }
+
+
+def compute_planned_optimizer_steps(*, steps_per_epoch: int, epochs: int, max_steps: int | None) -> int:
+    planned = max(1, steps_per_epoch) * max(1, epochs)
+    if max_steps is not None:
+        planned = min(planned, max(1, max_steps))
+    return max(1, planned)
+
+
+def compute_scheduled_learning_rate(
+    *,
+    step: int,
+    total_steps: int,
+    base_learning_rate: float,
+    warmup_steps: int,
+    schedule: str,
+) -> float:
+    step = max(1, step)
+    total_steps = max(1, total_steps)
+    warmup_steps = max(0, min(warmup_steps, total_steps))
+    if warmup_steps and step <= warmup_steps:
+        return base_learning_rate * (step / warmup_steps)
+    if schedule == "constant":
+        return base_learning_rate
+    if schedule != "cosine":
+        raise ValueError(f"unsupported lr scheduler: {schedule}")
+    decay_steps = max(1, total_steps - warmup_steps)
+    decay_step = min(max(0, step - warmup_steps), decay_steps)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * (decay_step / decay_steps)))
+    return base_learning_rate * cosine
+
+
+def set_optimizer_learning_rate(optimizer: Any, learning_rate: float) -> None:
+    for group in optimizer.param_groups:
+        group["lr"] = learning_rate
 
 
 def disable_deepspeed_nvtx_if_needed(deepspeed: Any) -> None:
