@@ -363,6 +363,15 @@ def run_real_sft(
                     "learning_rate": current_lr,
                 }
             )
+            if rank == 0 and (step == 1 or step % 10 == 0):
+                print(
+                    "train_progress "
+                    f"step={step}/{planned_steps} "
+                    f"epoch={epoch + 1}/{epochs} "
+                    f"loss={float(reduced_loss.cpu().item()):.6f} "
+                    f"lr={current_lr:.8f}",
+                    flush=True,
+                )
             if step % eval_every == 0:
                 eval_history.append(
                     evaluate_model(
@@ -814,13 +823,25 @@ def evaluate_model(
 
 
 def average_trainable_gradients_via_cpu(torch: Any, dist: Any, model: Any, world_size: int) -> None:
-    for parameter in model.parameters():
-        if not parameter.requires_grad or parameter.grad is None:
-            continue
-        cpu_grad = parameter.grad.detach().cpu()
-        dist.all_reduce(cpu_grad, op=dist.ReduceOp.SUM)
-        cpu_grad /= world_size
-        parameter.grad.copy_(cpu_grad.to(parameter.grad.device))
+    gradients = [
+        parameter.grad
+        for parameter in model.parameters()
+        if parameter.requires_grad and parameter.grad is not None
+    ]
+    if not gradients:
+        return
+    sizes = [gradient.numel() for gradient in gradients]
+    flat_cpu = torch.cat([gradient.detach().float().cpu().reshape(-1) for gradient in gradients])
+    dist.all_reduce(flat_cpu, op=dist.ReduceOp.SUM)
+    flat_cpu /= world_size
+    offset = 0
+    for gradient, size in zip(gradients, sizes):
+        synced = flat_cpu[offset : offset + size].view_as(gradient).to(
+            device=gradient.device,
+            dtype=gradient.dtype,
+        )
+        gradient.copy_(synced)
+        offset += size
 
 
 def write_real_sft_artifacts(output_dir: Path, report: dict[str, Any]) -> None:
