@@ -408,7 +408,7 @@ Remote GPU result:
 
 ### P1 - Data and Dataset Lineage
 
-Status: in progress
+Status: first GPU pass complete; longer training pending
 
 - Encode the SFT -> domain RL specialists -> OPD fusion recipe in the reference pipeline config. Completed for the manifest-backed reference config.
 - Add initial `Qwen/Qwen3.5-2B-Base` model lineage metadata. Exact model revision pin and final license approval remain required before real training.
@@ -752,10 +752,41 @@ Current notes:
 - First two-node ZeRO-3 smoke findings on 2026-06-25:
   - NCCL backend reached DeepSpeed model broadcast and failed with `ncclUnhandledCudaError: invalid argument` across the two containers.
   - Gloo backend reached the first forward pass but OOMed at sequence length 2048 because the runner padded every sample to the global max sequence length.
-  - Fix in progress: switch training/eval DataLoaders to dynamic per-batch padding while keeping `--max-seq-length 2048` as the truncation ceiling.
+  - Fixed: training/eval DataLoaders now use dynamic per-batch padding while keeping `--max-seq-length 2048` as the truncation ceiling.
   - After dynamic padding, Gloo ZeRO-3 reached backward but failed in Transformers gradient-checkpoint recomputation because ZeRO-3 partitioned parameters changed tensor metadata during recompute.
-  - Follow-up fix: disable Hugging Face gradient checkpointing on the `deepspeed-zero3` path and rely on dynamic padding plus ZeRO-3 offload for the short smoke run.
+  - Fixed: Hugging Face gradient checkpointing is disabled on the `deepspeed-zero3` path; dynamic padding plus ZeRO-3 offload is sufficient for the short runs.
+- Successful two-node GPU evidence on 2026-06-25:
+  - Code commit: `42f5482`.
+  - Both containers passed `PYTHONPATH=src /root/aitp-venv/bin/python -m unittest tests.test_pipeline` with 27 tests.
+  - LoRA ZeRO-3 smoke, matched 8 train / 4 eval examples, `--max-seq-length 2048`, 2 optimizer steps:
+    - run id: `zero3-smoke-2048-lora-final`
+    - backend: `gloo`, `world_size=2`, `gradient_sync=deepspeed-zero3`
+    - initial eval loss: `0.686241`
+    - final eval loss: `0.684624`
+    - trainable parameters: `5,455,872`
+  - LoRA ZeRO-3 short training window, 80 train / 20 eval examples, `--max-seq-length 2048`, 20 optimizer steps:
+    - run id: `zero3-lora-2048-20`
+    - initial eval loss: `0.957493`
+    - final eval loss: `0.922231`
+    - interpretation: validation loss improved over the short window on real ModelScope data.
+  - Full-SFT ZeRO-3 smoke, matched 8 train / 4 eval examples, `--max-seq-length 2048`, 2 optimizer steps:
+    - run id: `zero3-full-2048-smoke`
+    - backend: `gloo`, `world_size=2`, `gradient_sync=deepspeed-zero3`
+    - initial eval loss: `0.686241`
+    - final eval loss: `0.671204`
+    - trainable parameters: `1,881,825,088`
+  - Generated comparison report on rank0:
+    - `runs/sft-comparison-zero3-smoke.json`
+    - `runs/sft-comparison-zero3-smoke.csv`
+    - best final eval run in the matched smoke report: `zero3-full-2048-smoke`
 - If the two-container network cannot support DeepSpeed collectives, keep the code path and artifact plan intact, record the failure, and fall back to the existing CPU all-reduce path only for LoRA validation.
+
+Next execution steps:
+
+- Run a matched LoRA vs full comparison with the same larger sample counts and step budget. Recommended first target: 80 train / 20 eval examples, 20 optimizer steps, `--max-seq-length 2048`, LoRA learning rate `5e-5`, full-SFT learning rate `5e-6`.
+- If the matched full-SFT 20-step run is stable, scale both modes to the full 1,000-example `qwen3_32b_distill_1k.jsonl` file for 3 epochs.
+- If full-SFT 20-step is too slow, keep LoRA as the development baseline and reserve full-SFT for a larger GPU allocation or additional containers.
+- Investigate NCCL separately; current distributed training works through Gloo, but NCCL would be needed for higher throughput.
 
 ### P3 - Reward and Agentic Rollout Layer
 
