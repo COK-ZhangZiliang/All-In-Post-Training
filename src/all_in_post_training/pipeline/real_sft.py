@@ -225,8 +225,21 @@ def run_real_sft(
         eval_samples=eval_samples,
         seed=seed,
     )
-    train_dataset = build_sft_examples(tokenizer, rows["train"], max_seq_length)
-    eval_dataset = build_sft_examples(tokenizer, rows["eval"], max_seq_length)
+    progress_interval = 50 if rank == 0 else 0
+    train_dataset = build_sft_examples(
+        tokenizer,
+        rows["train"],
+        max_seq_length,
+        log_every=progress_interval,
+        log_prefix="train",
+    )
+    eval_dataset = build_sft_examples(
+        tokenizer,
+        rows["eval"],
+        max_seq_length,
+        log_every=progress_interval,
+        log_prefix="eval",
+    )
     train_sampler = DistributedSampler(
         train_dataset,
         num_replicas=world_size,
@@ -674,13 +687,28 @@ def build_sft_examples(
     tokenizer: Any,
     rows: list[dict[str, str]],
     max_seq_length: int,
+    *,
+    log_every: int = 0,
+    log_prefix: str = "sft",
 ) -> list[dict[str, list[int]]]:
     input_ids: list[list[int]] = []
     labels: list[list[int]] = []
     eos = tokenizer.eos_token or ""
-    for row in rows:
-        prompt_ids = tokenizer(format_prompt(row), add_special_tokens=False)["input_ids"]
-        response_ids = tokenizer(row["response"] + eos, add_special_tokens=False)["input_ids"]
+    for index, row in enumerate(rows, start=1):
+        if log_every and (index == 1 or index % log_every == 0 or index == len(rows)):
+            print(f"{log_prefix}_tokenize_progress rows={index}/{len(rows)}", flush=True)
+        prompt_ids = tokenizer(
+            format_prompt(row),
+            add_special_tokens=False,
+            truncation=True,
+            max_length=max_seq_length,
+        )["input_ids"]
+        response_ids = tokenizer(
+            row["response"] + eos,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=max_seq_length,
+        )["input_ids"]
         prompt_ids, response_ids = truncate_for_supervised_response(
             prompt_ids,
             response_ids,

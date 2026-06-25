@@ -448,8 +448,8 @@ class PipelineConfigTest(unittest.TestCase):
             eos_token = "<eos>"
             pad_token_id = 0
 
-            def __call__(self, text: str, add_special_tokens: bool = False) -> dict[str, list[int]]:
-                del add_special_tokens
+            def __call__(self, text: str, **kwargs: object) -> dict[str, list[int]]:
+                del kwargs
                 return {"input_ids": list(range(1, len(text.split()) + 1))}
 
         rows = [
