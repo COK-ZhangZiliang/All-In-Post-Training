@@ -753,6 +753,8 @@ Current notes:
   - NCCL backend reached DeepSpeed model broadcast and failed with `ncclUnhandledCudaError: invalid argument` across the two containers.
   - Gloo backend reached the first forward pass but OOMed at sequence length 2048 because the runner padded every sample to the global max sequence length.
   - Fix in progress: switch training/eval DataLoaders to dynamic per-batch padding while keeping `--max-seq-length 2048` as the truncation ceiling.
+  - After dynamic padding, Gloo ZeRO-3 reached backward but failed in Transformers gradient-checkpoint recomputation because ZeRO-3 partitioned parameters changed tensor metadata during recompute.
+  - Follow-up fix: disable Hugging Face gradient checkpointing on the `deepspeed-zero3` path and rely on dynamic padding plus ZeRO-3 offload for the short smoke run.
 - If the two-container network cannot support DeepSpeed collectives, keep the code path and artifact plan intact, record the failure, and fall back to the existing CPU all-reduce path only for LoRA validation.
 
 ### P3 - Reward and Agentic Rollout Layer

@@ -169,7 +169,9 @@ def run_real_sft(
     )
     if hasattr(model, "config"):
         model.config.use_cache = False
-    if hasattr(model, "gradient_checkpointing_enable"):
+    if should_enable_gradient_checkpointing(gradient_sync) and hasattr(
+        model, "gradient_checkpointing_enable"
+    ):
         model.gradient_checkpointing_enable()
     if tuning_mode == "lora":
         from peft import LoraConfig, get_peft_model
@@ -445,6 +447,10 @@ def disable_deepspeed_nvtx_if_needed(deepspeed: Any) -> None:
         return
     nvtx._range_push = lambda *args, **kwargs: None
     nvtx._range_pop = lambda *args, **kwargs: None
+
+
+def should_enable_gradient_checkpointing(gradient_sync: str) -> bool:
+    return gradient_sync != "deepspeed-zero3"
 
 
 def resolve_model_path(model_name: str, model_source: str) -> str:

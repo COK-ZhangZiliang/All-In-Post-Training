@@ -48,6 +48,7 @@ from all_in_post_training.pipeline.real_sft import (
     normalize_instruction_row,
     render_real_sft_curve_svg,
     rolling_average_points,
+    should_enable_gradient_checkpointing,
     truncate_for_supervised_response,
 )
 from all_in_post_training.pipeline.sft_compare import build_sft_comparison, write_sft_comparison_csv
@@ -468,6 +469,10 @@ class PipelineConfigTest(unittest.TestCase):
         self.assertEqual(config["zero_optimization"]["stage"], 3)
         self.assertEqual(config["zero_optimization"]["offload_optimizer"]["device"], "cpu")
         self.assertEqual(config["optimizer"]["params"]["lr"], 5e-5)
+
+    def test_real_sft_disables_gradient_checkpointing_for_zero3(self) -> None:
+        self.assertFalse(should_enable_gradient_checkpointing("deepspeed-zero3"))
+        self.assertTrue(should_enable_gradient_checkpointing("cpu-allreduce"))
 
     def test_sft_comparison_summarizes_lora_and_full_runs(self) -> None:
         lora = {
