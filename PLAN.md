@@ -873,6 +873,12 @@ Current notes:
   - Added best-eval checkpoint selection for non-DeepSpeed `checkpoint_policy=final` runs and early stopping controls through `--early-stopping-patience` and `--early-stopping-min-delta`.
   - Updated the SFT comparison report schema with accumulation, logging, train-eval, early-stop, best-step, and best-checkpoint fields.
 - If the two-container network cannot support DeepSpeed collectives, keep the code path and artifact plan intact, record the failure, and fall back to the existing CPU all-reduce path only for LoRA validation.
+- NCCL retest on 2026-06-26:
+  - Containers tested: rank0 `172.24.91.8`, rank1 `172.24.91.54`, both with RTX 5090, PyTorch `2.7.0a0+7c8ec84dab.nv25.03`, CUDA `12.8`, NCCL `2.25.1`.
+  - Single-node NCCL `world_size=1` all-reduce succeeded on both containers.
+  - Two-node NCCL `world_size=2` initialized over `eth0` and connected NCCL rings through socket transport, then failed on the first CUDA all-reduce with `ncclUnhandledCudaError` / `Cuda failure 1 'invalid argument'`.
+  - Conservative NCCL settings also failed: `NCCL_IB_DISABLE=1`, `NCCL_P2P_DISABLE=1`, `NCCL_SHM_DISABLE=1`, `NCCL_COLLNET_ENABLE=0`, `NCCL_NVLS_ENABLE=0`, `NCCL_ALGO=Ring`, `NCCL_PROTO=LL`, and one channel.
+  - Working interpretation: NCCL is present and usable locally, but cross-container NCCL collectives remain blocked in this runtime. Continue using Gloo-based ZeRO-3 or CPU all-reduce until the container image, driver/runtime, or cluster networking changes.
 
 Next execution steps:
 
