@@ -1,6 +1,6 @@
 # All-In Post-Training Plan
 
-Last updated: 2026-06-24
+Last updated: 2026-06-26
 
 ## Mission
 
@@ -884,10 +884,103 @@ Next execution steps:
 
 - First full-SFT 20-step attempt reached the final checkpoint save, then failed with `OSError: [Errno 28] No space left on device` while DeepSpeed wrote the full ZeRO-3 checkpoint. The runner now writes metrics before checkpoint save and supports `--checkpoint-policy none` for disk-constrained comparison runs.
 - Treat `cpuallreduce-lora-2048-3epoch-lr1e-5-flat` as the current SFT baseline for the next RL/OPD work.
+- Move the next real SFT run to the single-node 4x3090 host under `/mnt/data`, using NCCL instead of the earlier two-container Gloo fallback.
 - Re-run LoRA and full-SFT with the updated logging semantics, gradient accumulation, and fixed train-subset eval so the next comparison uses smoother and more interpretable curves.
 - Re-run full-SFT with a lower LR, likely `1e-6` or `2e-6`, and stop on best eval instead of final epoch.
-- Add an external artifact directory or larger disk before saving full ZeRO-3 checkpoints.
-- Investigate NCCL separately; current distributed training works through Gloo, but NCCL would be needed for higher throughput.
+- Save model, dataset, cache, and checkpoint artifacts on `/mnt/data`; the root disk should only hold OS and small tools.
+
+### P2.8 - Single-Node 4x3090 Training Host
+
+Status: in progress
+
+Objective: migrate the next real SFT iteration from the unstable two-container setup to a single 4-GPU RTX 3090 host with local NCCL, a mounted data disk, and all training caches under `/mnt/data`.
+
+Completed scope on 2026-06-26:
+
+- Configured local SSH alias `aitp-4x3090` for `ubuntu@36.103.203.253`.
+- Mounted the 120GB data disk as `/mnt/data`:
+  - device: `/dev/vdb`
+  - filesystem: `ext4`
+  - UUID: `1012fc63-fd86-4484-963c-ad6a20d31589`
+  - usable capacity: about `112G`
+  - fstab entry: `UUID=1012fc63-fd86-4484-963c-ad6a20d31589 /mnt/data ext4 defaults,nofail 0 2`
+- Synced the repository to `/mnt/data/All-In-Post-Training` at commit `5c7a540`.
+- Created the Python environment at `/mnt/data/aitp-venv`.
+- Configured cache and artifact paths through `~/.aitp_env`:
+  - `AITP_ROOT=/mnt/data/All-In-Post-Training`
+  - `HF_HOME=/mnt/data/cache/huggingface`
+  - `TRANSFORMERS_CACHE=/mnt/data/cache/transformers`
+  - `TORCH_HOME=/mnt/data/cache/torch`
+  - `MODELSCOPE_CACHE=/mnt/data/cache/modelscope`
+  - `PIP_CACHE_DIR=/mnt/data/cache/pip`
+- Installed GPU/runtime packages:
+  - Python `3.10.12`
+  - PyTorch `2.6.0+cu124`
+  - CUDA runtime reported by PyTorch: `12.4`
+  - `accelerate 1.14.0`
+  - `transformers 5.12.1`
+  - `datasets 5.0.0`
+  - `peft 0.19.1`
+  - `modelscope 1.37.1`
+  - `addict 2.4.0` for ModelScope dataset module imports
+  - `trl 1.7.0`
+  - `deepspeed 0.19.2`
+- Extended the real SFT runner with `--dataset-source modelscope|huggingface|local`, `--dataset-namespace`, and `--dataset-subset`.
+- Verified ModelScope dataset metadata resolution for:
+  - `AI-ModelScope/alpaca-gpt4-data-en`
+  - `AI-ModelScope/alpaca-gpt4-data-zh`
+- Added a cached Arrow fallback for ModelScope datasets when `modelscope 1.37.1` passes `verification_mode` into `datasets 5.0.0`.
+- Adjusted ZeRO-3 execution to use external `torch.optim.AdamW` for the real SFT runner, avoiding DeepSpeed `CPUAdam` JIT compilation on this host where system CUDA `11.8` differs from PyTorch CUDA `12.4`.
+
+Exit evidence:
+
+- GPU inventory: 4 x NVIDIA GeForce RTX 3090, each with 24GB VRAM.
+- Unit tests passed on the remote host: `PYTHONPATH=src python -m unittest tests.test_pipeline -v`.
+- Training preflight with CUDA and extras passed:
+  - command: `PYTHONPATH=src python -m all_in_post_training.cli pipeline preflight --config examples/post_training_pipeline.json --run-id remote-4x3090-preflight-full --require-cuda --require-training-extras`
+  - status: `ready`
+  - missing training extras: `0`
+  - missing download helpers: `0`
+  - `trl_sft_execute` remains gated only by the repository readiness audit.
+- Single-node 4-GPU NCCL all-reduce passed:
+  - command shape: `CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc-per-node=4 /mnt/data/nccl_4gpu_smoke.py`
+  - every rank returned `value=10.0` for the rank-sum all-reduce.
+- Project DDP fixture SFT passed with NCCL:
+  - run id: `remote-4x3090-ddp-smoke`
+  - backend: `nccl`
+  - gradient sync: `ddp`
+  - world size: `4`
+  - steps: `4`
+  - final loss: `3.534077`
+  - artifacts under `/mnt/data/runs/remote-4x3090-ddp-smoke/checkpoints/train_sft/`
+- DeepSpeed ZeRO-3 tiny 4-GPU step passed with NCCL:
+  - script: `/mnt/data/deepspeed_zero3_smoke.py`
+  - world size: `4`
+  - devices: `cuda:0`, `cuda:1`, `cuda:2`, `cuda:3`
+- GPU TRL SFT dry-run pipeline passed:
+  - run id: `remote-4x3090-trl-sft-dry-run`
+  - backend: `trl-sft-dry-run`
+  - SFT dry-run device: `cuda:0`
+  - dry-run steps: `2`
+- Real ModelScope LoRA SFT smoke passed:
+  - run id: `remote-4x3090-modelscope-lora-smoke-v3`
+  - command shape: `torchrun --standalone --nproc-per-node=4 -m all_in_post_training.pipeline.real_sft`
+  - model source: ModelScope `Qwen/Qwen3.5-2B-Base`
+  - dataset source: ModelScope `AI-ModelScope/alpaca-gpt4-data-en`
+  - gradient sync: `deepspeed-zero3`
+  - checkpoint policy: `none`
+  - world size: `4`
+  - steps: `1`
+  - trainable LoRA parameters: `5,455,872`
+  - train loss: `1.081902`
+  - eval loss: `1.116132 -> 1.115189`
+  - artifacts under `/mnt/data/runs/remote-4x3090-modelscope-lora-smoke-v3/checkpoints/train_sft/`
+
+Next execution steps:
+
+- Scale the real LoRA SFT baseline on this host from the 1-step smoke to a short measurable run, for example 512-2k samples, `max_seq_length=1024` or `2048`, and multiple eval intervals.
+- Run a lower-LR full-SFT comparison on this host, saving metrics and any ZeRO shards under `/mnt/data/runs`.
+- If 120GB is still tight for full ZeRO-3 checkpoints, prefer `--checkpoint-policy none` for metrics-only comparisons and save LoRA adapters or selected consolidated artifacts separately.
 
 ### P3 - Reward and Agentic Rollout Layer
 

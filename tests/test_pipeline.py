@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -44,9 +47,12 @@ from all_in_post_training.pipeline.real_sft import (
     collate_sft_examples,
     compute_planned_optimizer_steps,
     compute_scheduled_learning_rate,
+    deepspeed_mixed_precision,
     format_prompt,
+    find_cached_modelscope_arrow_file,
     load_instruction_dataset_file,
     load_instruction_rows,
+    load_raw_instruction_dataset,
     normalize_instruction_row,
     prefix_evaluation_metrics,
     render_real_sft_curve_svg,
@@ -422,6 +428,88 @@ class PipelineConfigTest(unittest.TestCase):
         self.assertEqual(len(rows["eval"]), 1)
         self.assertTrue(all(row["instruction"] for row in rows["train"] + rows["eval"]))
 
+    def test_real_sft_local_dataset_source_requires_file(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires --dataset-file"):
+            load_raw_instruction_dataset(
+                dataset_source="local",
+                dataset_name="unused",
+                dataset_namespace=None,
+                dataset_subset=None,
+                dataset_file=None,
+                dataset_split="train",
+            )
+
+    def test_real_sft_dispatches_modelscope_dataset_loader(self) -> None:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        class FakeMsDataset:
+            @staticmethod
+            def load(dataset_name: str, **kwargs: object) -> list[dict[str, str]]:
+                calls.append((dataset_name, kwargs))
+                return [{"instruction": "Task", "output": "Answer"}]
+
+        original_modelscope = sys.modules.get("modelscope")
+        original_msdatasets = sys.modules.get("modelscope.msdatasets")
+        try:
+            modelscope_module = types.ModuleType("modelscope")
+            msdatasets_module = types.ModuleType("modelscope.msdatasets")
+            msdatasets_module.MsDataset = FakeMsDataset
+            sys.modules["modelscope"] = modelscope_module
+            sys.modules["modelscope.msdatasets"] = msdatasets_module
+
+            dataset = load_raw_instruction_dataset(
+                dataset_source="modelscope",
+                dataset_name="AI-ModelScope/alpaca-gpt4-data-en",
+                dataset_namespace=None,
+                dataset_subset="default",
+                dataset_file=None,
+                dataset_split="train",
+            )
+        finally:
+            if original_modelscope is None:
+                sys.modules.pop("modelscope", None)
+            else:
+                sys.modules["modelscope"] = original_modelscope
+            if original_msdatasets is None:
+                sys.modules.pop("modelscope.msdatasets", None)
+            else:
+                sys.modules["modelscope.msdatasets"] = original_msdatasets
+
+        self.assertEqual(dataset, [{"instruction": "Task", "output": "Answer"}])
+        self.assertEqual(calls[0][0], "AI-ModelScope/alpaca-gpt4-data-en")
+        self.assertEqual(calls[0][1]["subset_name"], "default")
+        self.assertEqual(calls[0][1]["split"], "train")
+        self.assertTrue(calls[0][1]["trust_remote_code"])
+        self.assertNotIn("namespace", calls[0][1])
+
+    def test_real_sft_finds_cached_modelscope_arrow_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cache_root = Path(directory)
+            arrow_dir = (
+                cache_root
+                / "datasets"
+                / "AI-ModelScope___alpaca-gpt4-data-en"
+                / "default"
+                / "0.0.0"
+                / "master"
+            )
+            arrow_dir.mkdir(parents=True)
+            expected = arrow_dir / "alpaca-gpt4-data-en-train.arrow"
+            expected.write_bytes(b"arrow-placeholder")
+            previous = os.environ.get("MODELSCOPE_CACHE")
+            os.environ["MODELSCOPE_CACHE"] = str(cache_root)
+            try:
+                found = find_cached_modelscope_arrow_file(
+                    dataset_name="AI-ModelScope/alpaca-gpt4-data-en",
+                    dataset_split="train",
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("MODELSCOPE_CACHE", None)
+                else:
+                    os.environ["MODELSCOPE_CACHE"] = previous
+        self.assertEqual(found, expected)
+
     def test_real_sft_truncation_keeps_response_labels(self) -> None:
         prompt_ids = list(range(100))
         response_ids = [200, 201, 202, 203]
@@ -472,12 +560,37 @@ class PipelineConfigTest(unittest.TestCase):
             world_size=2,
             learning_rate=5e-5,
             gradient_accumulation_steps=4,
+            mixed_precision="fp16",
         )
         self.assertEqual(config["train_batch_size"], 8)
         self.assertEqual(config["gradient_accumulation_steps"], 4)
         self.assertEqual(config["zero_optimization"]["stage"], 3)
         self.assertEqual(config["zero_optimization"]["offload_optimizer"]["device"], "cpu")
         self.assertEqual(config["optimizer"]["params"]["lr"], 5e-5)
+        self.assertFalse(config["bf16"]["enabled"])
+        self.assertTrue(config["fp16"]["enabled"])
+
+    def test_real_sft_zero3_config_can_use_external_optimizer(self) -> None:
+        config = build_deepspeed_zero3_config(
+            batch_size=1,
+            world_size=4,
+            learning_rate=1e-5,
+            gradient_accumulation_steps=1,
+            mixed_precision="bf16",
+            include_optimizer=False,
+        )
+        self.assertNotIn("optimizer", config)
+        self.assertNotIn("offload_optimizer", config["zero_optimization"])
+        self.assertEqual(config["zero_optimization"]["stage"], 3)
+
+    def test_real_sft_deepspeed_precision_tracks_torch_dtype(self) -> None:
+        class FakeTorch:
+            bfloat16 = object()
+            float16 = object()
+
+        self.assertEqual(deepspeed_mixed_precision(FakeTorch, FakeTorch.bfloat16), "bf16")
+        self.assertEqual(deepspeed_mixed_precision(FakeTorch, FakeTorch.float16), "fp16")
+        self.assertEqual(deepspeed_mixed_precision(FakeTorch, object()), "fp32")
 
     def test_real_sft_disables_gradient_checkpointing_for_zero3(self) -> None:
         self.assertFalse(should_enable_gradient_checkpointing("deepspeed-zero3"))

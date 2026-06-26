@@ -10,7 +10,8 @@ import time
 from typing import Any
 
 
-DOLLY_DATASET = "databricks/databricks-dolly-15k"
+HUGGINGFACE_DOLLY_DATASET = "databricks/databricks-dolly-15k"
+MODELSCOPE_ALPACA_GPT4_EN_DATASET = "AI-ModelScope/alpaca-gpt4-data-en"
 QWEN_MODELSCOPE_MODEL = "Qwen/Qwen3.5-2B-Base"
 
 
@@ -27,7 +28,27 @@ def main(argv: list[str] | None = None) -> int:
         default="modelscope",
         help="How to resolve --model-name",
     )
-    parser.add_argument("--dataset-name", default=DOLLY_DATASET, help="Hugging Face dataset id")
+    parser.add_argument(
+        "--dataset-source",
+        choices=("modelscope", "huggingface", "local"),
+        default="modelscope",
+        help="How to resolve --dataset-name or --dataset-file",
+    )
+    parser.add_argument(
+        "--dataset-name",
+        default=MODELSCOPE_ALPACA_GPT4_EN_DATASET,
+        help="Dataset id for ModelScope or Hugging Face sources",
+    )
+    parser.add_argument(
+        "--dataset-namespace",
+        default=None,
+        help="Optional ModelScope dataset namespace override",
+    )
+    parser.add_argument(
+        "--dataset-subset",
+        default=None,
+        help="Optional ModelScope or Hugging Face dataset subset/config name",
+    )
     parser.add_argument(
         "--dataset-file",
         default=None,
@@ -123,7 +144,10 @@ def main(argv: list[str] | None = None) -> int:
         run_id=args.run_id,
         model_name=args.model_name,
         model_source=args.model_source,
+        dataset_source=args.dataset_source,
         dataset_name=args.dataset_name,
+        dataset_namespace=args.dataset_namespace,
+        dataset_subset=args.dataset_subset,
         dataset_file=Path(args.dataset_file) if args.dataset_file else None,
         dataset_split=args.dataset_split,
         train_samples=max(1, args.train_samples),
@@ -171,7 +195,10 @@ def run_real_sft(
     run_id: str,
     model_name: str,
     model_source: str,
+    dataset_source: str,
     dataset_name: str,
+    dataset_namespace: str | None,
+    dataset_subset: str | None,
     dataset_file: Path | None,
     dataset_split: str,
     train_samples: int,
@@ -255,7 +282,10 @@ def run_real_sft(
     model.train()
 
     raw_dataset = load_raw_instruction_dataset(
+        dataset_source=dataset_source,
         dataset_name=dataset_name,
+        dataset_namespace=dataset_namespace,
+        dataset_subset=dataset_subset,
         dataset_file=dataset_file,
         dataset_split=dataset_split,
     )
@@ -341,10 +371,14 @@ def run_real_sft(
             world_size=world_size,
             learning_rate=learning_rate,
             gradient_accumulation_steps=gradient_accumulation_steps,
+            mixed_precision=deepspeed_mixed_precision(torch, torch_dtype),
+            include_optimizer=False,
         )
+        optimizer = torch.optim.AdamW(trainable_parameters, lr=learning_rate)
         model_engine, _, _, _ = deepspeed.initialize(
             model=model,
             model_parameters=trainable_parameters,
+            optimizer=optimizer,
             config=deepspeed_config,
         )
         model = model_engine
@@ -637,7 +671,10 @@ def run_real_sft(
         "model_name": model_name,
         "model_source": model_source,
         "resolved_model_path": str(model_path),
+        "dataset_source": dataset_source,
         "dataset_name": dataset_name,
+        "dataset_namespace": dataset_namespace,
+        "dataset_subset": dataset_subset,
         "dataset_file": str(dataset_file) if dataset_file else None,
         "dataset_split": dataset_split,
         "train_samples": len(rows["train"]),
@@ -714,23 +751,35 @@ def build_deepspeed_zero3_config(
     world_size: int,
     learning_rate: float,
     gradient_accumulation_steps: int,
+    mixed_precision: str = "bf16",
+    include_optimizer: bool = True,
 ) -> dict[str, Any]:
     gradient_accumulation_steps = max(1, gradient_accumulation_steps)
-    return {
+    if mixed_precision not in {"bf16", "fp16", "fp32"}:
+        raise ValueError(f"unsupported DeepSpeed mixed precision mode: {mixed_precision}")
+    zero_optimization: dict[str, Any] = {
+        "stage": 3,
+        "offload_param": {"device": "cpu", "pin_memory": True},
+        "overlap_comm": False,
+        "contiguous_gradients": True,
+        "stage3_gather_16bit_weights_on_model_save": False,
+    }
+    if include_optimizer:
+        zero_optimization["offload_optimizer"] = {"device": "cpu", "pin_memory": True}
+
+    config = {
         "train_micro_batch_size_per_gpu": batch_size,
         "train_batch_size": batch_size * world_size * gradient_accumulation_steps,
         "gradient_accumulation_steps": gradient_accumulation_steps,
         "gradient_clipping": 1.0,
-        "bf16": {"enabled": True},
-        "zero_optimization": {
-            "stage": 3,
-            "offload_optimizer": {"device": "cpu", "pin_memory": True},
-            "offload_param": {"device": "cpu", "pin_memory": True},
-            "overlap_comm": False,
-            "contiguous_gradients": True,
-            "stage3_gather_16bit_weights_on_model_save": False,
-        },
-        "optimizer": {
+        "bf16": {"enabled": mixed_precision == "bf16"},
+        "fp16": {"enabled": mixed_precision == "fp16"},
+        "zero_optimization": zero_optimization,
+        "steps_per_print": 100000,
+        "wall_clock_breakdown": False,
+    }
+    if include_optimizer:
+        config["optimizer"] = {
             "type": "AdamW",
             "params": {
                 "lr": learning_rate,
@@ -738,10 +787,8 @@ def build_deepspeed_zero3_config(
                 "eps": 1e-8,
                 "weight_decay": 0.0,
             },
-        },
-        "steps_per_print": 100000,
-        "wall_clock_breakdown": False,
-    }
+        }
+    return config
 
 
 def compute_planned_optimizer_steps(
@@ -796,6 +843,14 @@ def disable_deepspeed_nvtx_if_needed(deepspeed: Any) -> None:
 
 def should_enable_gradient_checkpointing(gradient_sync: str) -> bool:
     return gradient_sync != "deepspeed-zero3"
+
+
+def deepspeed_mixed_precision(torch: Any, torch_dtype: Any) -> str:
+    if torch_dtype == torch.bfloat16:
+        return "bf16"
+    if torch_dtype == torch.float16:
+        return "fp16"
+    return "fp32"
 
 
 def count_supervised_tokens(torch: Any, labels: Any) -> Any:
@@ -860,14 +915,78 @@ def resolve_model_path(model_name: str, model_source: str) -> str:
 
 
 def load_raw_instruction_dataset(
-    *, dataset_name: str, dataset_file: Path | None, dataset_split: str
+    *,
+    dataset_source: str,
+    dataset_name: str,
+    dataset_namespace: str | None,
+    dataset_subset: str | None,
+    dataset_file: Path | None,
+    dataset_split: str,
 ) -> Any:
-    if dataset_file is not None:
+    if dataset_source == "local" or dataset_file is not None:
+        if dataset_file is None:
+            raise ValueError("--dataset-source local requires --dataset-file")
         return load_instruction_dataset_file(dataset_file)
 
-    from datasets import load_dataset
+    if dataset_source == "modelscope":
+        from modelscope.msdatasets import MsDataset
 
-    return load_dataset(dataset_name, split=dataset_split)
+        kwargs = {
+            "subset_name": dataset_subset,
+            "split": dataset_split,
+            "trust_remote_code": True,
+        }
+        if dataset_namespace is not None:
+            kwargs["namespace"] = dataset_namespace
+        try:
+            return MsDataset.load(dataset_name, **kwargs)
+        except TypeError as exc:
+            if "verification_mode" not in str(exc):
+                raise
+            return load_cached_modelscope_arrow_dataset(
+                dataset_name=dataset_name,
+                dataset_split=dataset_split,
+            )
+
+    if dataset_source == "huggingface":
+        from datasets import load_dataset
+
+        return load_dataset(dataset_name, name=dataset_subset, split=dataset_split)
+
+    raise ValueError(f"unsupported dataset source: {dataset_source}")
+
+
+def load_cached_modelscope_arrow_dataset(*, dataset_name: str, dataset_split: str) -> Any:
+    from datasets import Dataset
+
+    arrow_path = find_cached_modelscope_arrow_file(
+        dataset_name=dataset_name,
+        dataset_split=dataset_split,
+    )
+    if arrow_path is None:
+        raise RuntimeError(
+            "ModelScope dataset load failed and no cached Arrow fallback was found for "
+            f"{dataset_name}:{dataset_split}"
+        )
+    return Dataset.from_file(str(arrow_path))
+
+
+def find_cached_modelscope_arrow_file(*, dataset_name: str, dataset_split: str) -> Path | None:
+    cache_root = Path(os.environ.get("MODELSCOPE_CACHE", Path.home() / ".cache" / "modelscope"))
+    dataset_cache = cache_root / "datasets"
+    if not dataset_cache.exists():
+        return None
+    dataset_slug = dataset_name.split("/")[-1].lower()
+    split_slug = dataset_split.lower()
+    arrows = sorted(dataset_cache.rglob("*.arrow"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in arrows:
+        lower_path = str(path).lower()
+        if dataset_slug in lower_path and split_slug in lower_path:
+            return path
+    for path in arrows:
+        if dataset_slug in str(path).lower():
+            return path
+    return None
 
 
 def load_instruction_dataset_file(path: Path) -> list[dict[str, Any]]:
