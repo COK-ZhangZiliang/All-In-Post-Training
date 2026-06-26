@@ -45,6 +45,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional maximum optimizer steps before stopping the run",
     )
     parser.add_argument("--batch-size", type=int, default=1, help="Per-rank batch size")
+    parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=1,
+        help="Number of microbatches to accumulate before each optimizer step",
+    )
     parser.add_argument("--learning-rate", type=float, default=1e-5, help="Peak AdamW learning rate")
     parser.add_argument(
         "--warmup-ratio",
@@ -59,6 +65,30 @@ def main(argv: list[str] | None = None) -> int:
         help="Learning-rate schedule after warmup",
     )
     parser.add_argument("--eval-every", type=int, default=8, help="Optimizer-step eval interval")
+    parser.add_argument(
+        "--logging-steps",
+        type=int,
+        default=10,
+        help="Optimizer-step interval for token-weighted train-loss logging",
+    )
+    parser.add_argument(
+        "--train-eval-samples",
+        type=int,
+        default=32,
+        help="Fixed train-subset size for train-set evaluation at eval intervals. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=0,
+        help="Number of non-improving eval checks before early stop. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum eval-loss improvement required to reset early-stopping patience",
+    )
     parser.add_argument(
         "--tuning-mode",
         choices=("lora", "full"),
@@ -102,10 +132,15 @@ def main(argv: list[str] | None = None) -> int:
         epochs=max(1, args.epochs),
         max_steps=max(1, args.max_steps) if args.max_steps is not None else None,
         batch_size=max(1, args.batch_size),
+        gradient_accumulation_steps=max(1, args.gradient_accumulation_steps),
         learning_rate=args.learning_rate,
         warmup_ratio=max(0.0, min(1.0, args.warmup_ratio)),
         lr_scheduler=args.lr_scheduler,
         eval_every=max(1, args.eval_every),
+        logging_steps=max(1, args.logging_steps),
+        train_eval_samples=max(0, args.train_eval_samples),
+        early_stopping_patience=max(0, args.early_stopping_patience),
+        early_stopping_min_delta=max(0.0, args.early_stopping_min_delta),
         tuning_mode=args.tuning_mode,
         lora_r=max(1, args.lora_r),
         lora_alpha=max(1, args.lora_alpha),
@@ -145,10 +180,15 @@ def run_real_sft(
     epochs: int,
     max_steps: int | None,
     batch_size: int,
+    gradient_accumulation_steps: int,
     learning_rate: float,
     warmup_ratio: float,
     lr_scheduler: str,
     eval_every: int,
+    logging_steps: int,
+    train_eval_samples: int,
+    early_stopping_patience: int,
+    early_stopping_min_delta: float,
     tuning_mode: str,
     lora_r: int,
     lora_alpha: int,
@@ -266,6 +306,25 @@ def run_real_sft(
         sampler=eval_sampler,
         collate_fn=lambda batch: collate_sft_examples(batch, pad_token_id=int(tokenizer.pad_token_id)),
     )
+    train_eval_dataset = train_dataset[: min(train_eval_samples, len(train_dataset))]
+    train_eval_loader = None
+    if train_eval_dataset:
+        train_eval_sampler = DistributedSampler(
+            train_eval_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+            drop_last=False,
+        )
+        train_eval_loader = DataLoader(
+            train_eval_dataset,
+            batch_size=batch_size,
+            sampler=train_eval_sampler,
+            collate_fn=lambda batch: collate_sft_examples(
+                batch,
+                pad_token_id=int(tokenizer.pad_token_id),
+            ),
+        )
 
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     model_engine = None
@@ -281,6 +340,7 @@ def run_real_sft(
             batch_size=batch_size,
             world_size=world_size,
             learning_rate=learning_rate,
+            gradient_accumulation_steps=gradient_accumulation_steps,
         )
         model_engine, _, _, _ = deepspeed.initialize(
             model=model,
@@ -297,32 +357,71 @@ def run_real_sft(
         steps_per_epoch=len(train_loader),
         epochs=epochs,
         max_steps=max_steps,
+        gradient_accumulation_steps=gradient_accumulation_steps,
     )
     warmup_steps = int(math.ceil(planned_steps * warmup_ratio)) if warmup_ratio > 0 else 0
     start = time.time()
     train_history: list[dict[str, Any]] = []
     eval_history: list[dict[str, Any]] = []
+    train_eval_history: list[dict[str, Any]] = []
     step = 0
+    micro_step = 0
+    best_eval_loss = math.inf
+    best_eval_step: int | None = None
+    best_checkpoint_path: str | None = None
+    non_improving_evals = 0
+    should_stop = False
+    pending_loss_sum = 0.0
+    pending_tokens = 0
+    pending_local_losses: list[float] = []
+    pending_micro_steps = 0
+    log_loss_sum = 0.0
+    log_tokens = 0
+    log_local_losses: list[float] = []
+    log_optimizer_steps = 0
+    log_micro_steps = 0
+    log_start_step = 1
 
-    eval_history.append(
-        evaluate_model(
-            torch=torch,
-            dist=dist,
-            model=model,
-            loader=eval_loader,
-            device=device,
-            distributed=distributed,
-            world_size=world_size,
-            step=step,
-            epoch=0,
-        )
+    initial_eval = evaluate_model(
+        torch=torch,
+        dist=dist,
+        model=model,
+        loader=eval_loader,
+        device=device,
+        distributed=distributed,
+        world_size=world_size,
+        step=step,
+        epoch=0,
     )
+    eval_history.append(initial_eval)
+    best_eval_loss = float(initial_eval["eval_loss"])
+    best_eval_step = 0
+    if train_eval_loader is not None:
+        train_eval_history.append(
+            prefix_evaluation_metrics(
+                evaluate_model(
+                    torch=torch,
+                    dist=dist,
+                    model=model,
+                    loader=train_eval_loader,
+                    device=device,
+                    distributed=distributed,
+                    world_size=world_size,
+                    step=step,
+                    epoch=0,
+                ),
+                prefix="train_eval",
+            )
+        )
+    model.train()
+
     for epoch in range(epochs):
         train_sampler.set_epoch(epoch)
         for batch in train_loader:
-            step += 1
+            micro_step += 1
+            next_step = step + 1
             current_lr = compute_scheduled_learning_rate(
-                step=step,
+                step=next_step,
                 total_steps=planned_steps,
                 base_learning_rate=learning_rate,
                 warmup_steps=warmup_steps,
@@ -337,59 +436,143 @@ def run_real_sft(
                 set_optimizer_learning_rate(optimizer, current_lr)
             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.loss
+            token_count = count_supervised_tokens(torch, labels)
+            reduced_loss_sum, reduced_tokens = reduce_loss_sum_and_tokens(
+                torch=torch,
+                dist=dist,
+                loss=loss.detach(),
+                token_count=token_count,
+                distributed=distributed,
+            )
+            pending_loss_sum += reduced_loss_sum
+            pending_tokens += reduced_tokens
+            pending_local_losses.append(float(loss.detach().cpu().item()))
+            pending_micro_steps += 1
+
+            accumulation_boundary = pending_micro_steps >= gradient_accumulation_steps
+            epoch_boundary = micro_step % len(train_loader) == 0
             if model_engine is not None:
                 model_engine.backward(loss)
                 model_engine.step()
                 grad_norm = 0.0
             else:
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                if distributed and gradient_sync == "cpu-allreduce":
-                    average_trainable_gradients_via_cpu(torch, dist, model, world_size)
-                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_parameters, max_norm=1.0)
-                optimizer.step()
+                if pending_micro_steps == 1:
+                    optimizer.zero_grad(set_to_none=True)
+                scaled_loss = loss / gradient_accumulation_steps
+                scaled_loss.backward()
+                if accumulation_boundary or epoch_boundary:
+                    if distributed and gradient_sync == "cpu-allreduce":
+                        average_trainable_gradients_via_cpu(torch, dist, model, world_size)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(trainable_parameters, max_norm=1.0)
+                    optimizer.step()
+                else:
+                    grad_norm = 0.0
 
-            reduced_loss = loss.detach().clone()
-            if distributed:
-                dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM)
-                reduced_loss = reduced_loss / world_size
-            train_history.append(
-                {
-                    "step": step,
-                    "epoch": epoch + 1,
-                    "train_loss": float(reduced_loss.cpu().item()),
-                    "local_train_loss": float(loss.detach().cpu().item()),
-                    "grad_norm": float(_to_float(grad_norm)),
-                    "learning_rate": current_lr,
-                }
-            )
+            optimizer_boundary = accumulation_boundary or epoch_boundary
+            if not optimizer_boundary:
+                continue
+
+            step += 1
+            optimizer_loss = pending_loss_sum / max(1, pending_tokens)
+            log_loss_sum += pending_loss_sum
+            log_tokens += pending_tokens
+            log_local_losses.extend(pending_local_losses)
+            log_optimizer_steps += 1
+            log_micro_steps += pending_micro_steps
+            should_log = step == 1 or step % logging_steps == 0 or step >= planned_steps
+            if should_log:
+                train_history.append(
+                    {
+                        "step": step,
+                        "epoch": epoch + 1,
+                        "train_loss": log_loss_sum / max(1, log_tokens),
+                        "local_train_loss": sum(log_local_losses) / len(log_local_losses),
+                        "optimizer_steps": log_optimizer_steps,
+                        "micro_steps": log_micro_steps,
+                        "log_start_step": log_start_step,
+                        "log_end_step": step,
+                        "train_tokens": log_tokens,
+                        "grad_norm": float(_to_float(grad_norm)),
+                        "learning_rate": current_lr,
+                    }
+                )
+                log_loss_sum = 0.0
+                log_tokens = 0
+                log_local_losses = []
+                log_optimizer_steps = 0
+                log_micro_steps = 0
+                log_start_step = step + 1
             if rank == 0 and (step == 1 or step % 10 == 0):
                 print(
                     "train_progress "
                     f"step={step}/{planned_steps} "
                     f"epoch={epoch + 1}/{epochs} "
-                    f"loss={float(reduced_loss.cpu().item()):.6f} "
+                    f"loss={optimizer_loss:.6f} "
                     f"lr={current_lr:.8f}",
                     flush=True,
                 )
+            pending_loss_sum = 0.0
+            pending_tokens = 0
+            pending_local_losses = []
+            pending_micro_steps = 0
             if step % eval_every == 0:
-                eval_history.append(
-                    evaluate_model(
-                        torch=torch,
-                        dist=dist,
-                        model=model,
-                        loader=eval_loader,
-                        device=device,
-                        distributed=distributed,
-                        world_size=world_size,
-                        step=step,
-                        epoch=epoch + 1,
-                    )
+                current_eval = evaluate_model(
+                    torch=torch,
+                    dist=dist,
+                    model=model,
+                    loader=eval_loader,
+                    device=device,
+                    distributed=distributed,
+                    world_size=world_size,
+                    step=step,
+                    epoch=epoch + 1,
                 )
+                eval_history.append(current_eval)
+                if train_eval_loader is not None:
+                    train_eval_history.append(
+                        prefix_evaluation_metrics(
+                            evaluate_model(
+                                torch=torch,
+                                dist=dist,
+                                model=model,
+                                loader=train_eval_loader,
+                                device=device,
+                                distributed=distributed,
+                                world_size=world_size,
+                                step=step,
+                                epoch=epoch + 1,
+                            ),
+                            prefix="train_eval",
+                        )
+                    )
+                improved = current_eval["eval_loss"] < (best_eval_loss - early_stopping_min_delta)
+                if improved:
+                    best_eval_loss = float(current_eval["eval_loss"])
+                    best_eval_step = step
+                    non_improving_evals = 0
+                    if rank == 0:
+                        best_checkpoint_path = maybe_save_best_checkpoint(
+                            model=model,
+                            output_dir=output_dir,
+                            tuning_mode=tuning_mode,
+                            checkpoint_policy=checkpoint_policy,
+                            model_engine=model_engine,
+                        )
+                else:
+                    non_improving_evals += 1
+                if (
+                    early_stopping_patience
+                    and non_improving_evals >= early_stopping_patience
+                ):
+                    should_stop = True
                 model.train()
-            if max_steps is not None and step >= max_steps:
+                if distributed:
+                    stop_flag = torch.tensor(1 if should_stop else 0, device=device)
+                    dist.all_reduce(stop_flag, op=dist.ReduceOp.MAX)
+                    should_stop = bool(int(stop_flag.cpu().item()))
+            if (max_steps is not None and step >= max_steps) or should_stop:
                 break
-        if max_steps is not None and step >= max_steps:
+        if (max_steps is not None and step >= max_steps) or should_stop:
             break
 
     if not eval_history or eval_history[-1]["step"] != step:
@@ -404,6 +587,38 @@ def run_real_sft(
                 world_size=world_size,
                 step=step,
                 epoch=epochs,
+            )
+        )
+        model.train()
+        current_eval = eval_history[-1]
+        if current_eval["eval_loss"] < (best_eval_loss - early_stopping_min_delta):
+            best_eval_loss = float(current_eval["eval_loss"])
+            best_eval_step = step
+            if rank == 0:
+                best_checkpoint_path = maybe_save_best_checkpoint(
+                    model=model,
+                    output_dir=output_dir,
+                    tuning_mode=tuning_mode,
+                    checkpoint_policy=checkpoint_policy,
+                    model_engine=model_engine,
+                )
+    if train_eval_loader is not None and (
+        not train_eval_history or train_eval_history[-1]["step"] != step
+    ):
+        train_eval_history.append(
+            prefix_evaluation_metrics(
+                evaluate_model(
+                    torch=torch,
+                    dist=dist,
+                    model=model,
+                    loader=train_eval_loader,
+                    device=device,
+                    distributed=distributed,
+                    world_size=world_size,
+                    step=step,
+                    epoch=epochs,
+                ),
+                prefix="train_eval",
             )
         )
         model.train()
@@ -431,11 +646,20 @@ def run_real_sft(
         "epochs": epochs,
         "max_steps": max_steps,
         "batch_size": batch_size,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
         "learning_rate": learning_rate,
         "warmup_ratio": warmup_ratio,
         "warmup_steps": warmup_steps,
         "lr_scheduler": lr_scheduler,
         "planned_steps": planned_steps,
+        "logging_steps": logging_steps,
+        "train_eval_samples": len(train_eval_dataset),
+        "early_stopping_patience": early_stopping_patience,
+        "early_stopping_min_delta": early_stopping_min_delta,
+        "early_stopped": should_stop,
+        "best_eval_loss": best_eval_loss,
+        "best_eval_step": best_eval_step,
+        "best_checkpoint_path": best_checkpoint_path,
         "tuning_mode": tuning_mode,
         "lora": {
             "r": lora_r,
@@ -448,6 +672,7 @@ def run_real_sft(
         "duration_seconds": round(time.time() - start, 3),
         "train_history": train_history,
         "eval_history": eval_history,
+        "train_eval_history": train_eval_history,
     }
 
     if rank == 0:
@@ -483,11 +708,18 @@ def run_real_sft(
     return report
 
 
-def build_deepspeed_zero3_config(*, batch_size: int, world_size: int, learning_rate: float) -> dict[str, Any]:
+def build_deepspeed_zero3_config(
+    *,
+    batch_size: int,
+    world_size: int,
+    learning_rate: float,
+    gradient_accumulation_steps: int,
+) -> dict[str, Any]:
+    gradient_accumulation_steps = max(1, gradient_accumulation_steps)
     return {
         "train_micro_batch_size_per_gpu": batch_size,
-        "train_batch_size": batch_size * world_size,
-        "gradient_accumulation_steps": 1,
+        "train_batch_size": batch_size * world_size * gradient_accumulation_steps,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
         "gradient_clipping": 1.0,
         "bf16": {"enabled": True},
         "zero_optimization": {
@@ -512,8 +744,15 @@ def build_deepspeed_zero3_config(*, batch_size: int, world_size: int, learning_r
     }
 
 
-def compute_planned_optimizer_steps(*, steps_per_epoch: int, epochs: int, max_steps: int | None) -> int:
-    planned = max(1, steps_per_epoch) * max(1, epochs)
+def compute_planned_optimizer_steps(
+    *,
+    steps_per_epoch: int,
+    epochs: int,
+    max_steps: int | None,
+    gradient_accumulation_steps: int,
+) -> int:
+    micro_steps = max(1, steps_per_epoch) * max(1, epochs)
+    planned = math.ceil(micro_steps / max(1, gradient_accumulation_steps))
     if max_steps is not None:
         planned = min(planned, max(1, max_steps))
     return max(1, planned)
@@ -557,6 +796,57 @@ def disable_deepspeed_nvtx_if_needed(deepspeed: Any) -> None:
 
 def should_enable_gradient_checkpointing(gradient_sync: str) -> bool:
     return gradient_sync != "deepspeed-zero3"
+
+
+def count_supervised_tokens(torch: Any, labels: Any) -> Any:
+    return (labels != -100).sum().to(dtype=torch.float32)
+
+
+def reduce_loss_sum_and_tokens(
+    *,
+    torch: Any,
+    dist: Any,
+    loss: Any,
+    token_count: Any,
+    distributed: bool,
+) -> tuple[float, int]:
+    loss_sum = loss * token_count
+    if distributed:
+        packed = torch.stack([loss_sum.to(dtype=torch.float32), token_count.to(dtype=torch.float32)])
+        dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+        loss_sum = packed[0]
+        token_count = packed[1]
+    return float(loss_sum.cpu().item()), int(token_count.cpu().item())
+
+
+def prefix_evaluation_metrics(metrics: dict[str, Any], prefix: str) -> dict[str, Any]:
+    prefixed = {
+        "step": metrics["step"],
+        "epoch": metrics["epoch"],
+    }
+    for key, value in metrics.items():
+        if key in {"step", "epoch"}:
+            continue
+        if key.startswith("eval_"):
+            key = key.removeprefix("eval_")
+        prefixed[f"{prefix}_{key}"] = value
+    return prefixed
+
+
+def maybe_save_best_checkpoint(
+    *,
+    model: Any,
+    output_dir: Path,
+    tuning_mode: str,
+    checkpoint_policy: str,
+    model_engine: Any,
+) -> str | None:
+    if checkpoint_policy != "final" or model_engine is not None:
+        return None
+    checkpoint_dir = output_dir / ("best_adapter" if tuning_mode == "lora" else "best_model")
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(checkpoint_dir)
+    return str(checkpoint_dir)
 
 
 def resolve_model_path(model_name: str, model_source: str) -> str:
@@ -851,8 +1141,14 @@ def write_real_sft_artifacts(output_dir: Path, report: dict[str, Any]) -> None:
     )
     write_metric_csv(output_dir / "train_history.csv", report["train_history"])
     write_metric_csv(output_dir / "eval_history.csv", report["eval_history"])
+    write_metric_csv(output_dir / "train_eval_history.csv", report.get("train_eval_history", []))
     (output_dir / "sft_eval_curve.svg").write_text(
-        render_real_sft_curve_svg(report["train_history"], report["eval_history"], report["run_id"]),
+        render_real_sft_curve_svg(
+            report["train_history"],
+            report["eval_history"],
+            report["run_id"],
+            train_eval_history=report.get("train_eval_history", []),
+        ),
         encoding="utf-8",
     )
 
@@ -871,6 +1167,8 @@ def render_real_sft_curve_svg(
     train_history: list[dict[str, Any]],
     eval_history: list[dict[str, Any]],
     run_id: str,
+    *,
+    train_eval_history: list[dict[str, Any]] | None = None,
 ) -> str:
     width = 1040
     height = 600
@@ -891,6 +1189,18 @@ def render_real_sft_curve_svg(
         ),
         ("eval", [(int(item["step"]), float(item["eval_loss"])) for item in eval_history], "#dc2626"),
     ]
+    if train_eval_history:
+        series.append(
+            (
+                "train_eval",
+                [
+                    (int(item["step"]), float(item["train_eval_loss"]))
+                    for item in train_eval_history
+                    if item.get("train_eval_loss") is not None
+                ],
+                "#f97316",
+            )
+        )
     all_points = [point for _, points, _ in series for point in points if math.isfinite(point[1])]
     if not all_points:
         all_points = [(0, 0.0)]

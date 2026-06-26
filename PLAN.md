@@ -866,13 +866,19 @@ Current notes:
   - Interpretation:
     - LoRA is the current SFT baseline: it improved held-out loss monotonically enough to finish at the best eval point, trained much faster, and saved an adapter checkpoint.
     - Full-SFT overfit or destabilized at `lr=1e-5`: train loss collapsed to `0.119953`, but held-out loss worsened from `0.930094` to `1.137491`. Its best eval loss appeared mid-run, so full-SFT needs lower LR, stronger regularization, best-checkpoint selection, or early stopping before it should be used as the baseline.
+- Runner update after the full-SFT curve audit:
+  - Added `--gradient-accumulation-steps` so future runs can use larger effective batches without increasing per-rank microbatch size.
+  - Training loss is now logged as a token-weighted aggregate over the logging window instead of a raw per-microbatch point, reducing visual noise from variable-length dynamic batches.
+  - Added `--logging-steps` and a fixed `--train-eval-samples` evaluation slice, allowing plots to compare smoothed train loss, held-out eval loss, and train-subset eval loss.
+  - Added best-eval checkpoint selection for non-DeepSpeed `checkpoint_policy=final` runs and early stopping controls through `--early-stopping-patience` and `--early-stopping-min-delta`.
+  - Updated the SFT comparison report schema with accumulation, logging, train-eval, early-stop, best-step, and best-checkpoint fields.
 - If the two-container network cannot support DeepSpeed collectives, keep the code path and artifact plan intact, record the failure, and fall back to the existing CPU all-reduce path only for LoRA validation.
 
 Next execution steps:
 
 - First full-SFT 20-step attempt reached the final checkpoint save, then failed with `OSError: [Errno 28] No space left on device` while DeepSpeed wrote the full ZeRO-3 checkpoint. The runner now writes metrics before checkpoint save and supports `--checkpoint-policy none` for disk-constrained comparison runs.
 - Treat `cpuallreduce-lora-2048-3epoch-lr1e-5-flat` as the current SFT baseline for the next RL/OPD work.
-- Add best-eval checkpoint selection and early stopping before another full-SFT run.
+- Re-run LoRA and full-SFT with the updated logging semantics, gradient accumulation, and fixed train-subset eval so the next comparison uses smoother and more interpretable curves.
 - Re-run full-SFT with a lower LR, likely `1e-6` or `2e-6`, and stop on best eval instead of final epoch.
 - Add an external artifact directory or larger disk before saving full ZeRO-3 checkpoints.
 - Investigate NCCL separately; current distributed training works through Gloo, but NCCL would be needed for higher throughput.

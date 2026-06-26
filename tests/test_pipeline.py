@@ -48,6 +48,7 @@ from all_in_post_training.pipeline.real_sft import (
     load_instruction_dataset_file,
     load_instruction_rows,
     normalize_instruction_row,
+    prefix_evaluation_metrics,
     render_real_sft_curve_svg,
     rolling_average_points,
     should_enable_gradient_checkpointing,
@@ -466,8 +467,14 @@ class PipelineConfigTest(unittest.TestCase):
         )
 
     def test_real_sft_zero3_config_uses_stage_three_offload(self) -> None:
-        config = build_deepspeed_zero3_config(batch_size=1, world_size=2, learning_rate=5e-5)
-        self.assertEqual(config["train_batch_size"], 2)
+        config = build_deepspeed_zero3_config(
+            batch_size=1,
+            world_size=2,
+            learning_rate=5e-5,
+            gradient_accumulation_steps=4,
+        )
+        self.assertEqual(config["train_batch_size"], 8)
+        self.assertEqual(config["gradient_accumulation_steps"], 4)
         self.assertEqual(config["zero_optimization"]["stage"], 3)
         self.assertEqual(config["zero_optimization"]["offload_optimizer"]["device"], "cpu")
         self.assertEqual(config["optimizer"]["params"]["lr"], 5e-5)
@@ -477,7 +484,12 @@ class PipelineConfigTest(unittest.TestCase):
         self.assertTrue(should_enable_gradient_checkpointing("cpu-allreduce"))
 
     def test_real_sft_cosine_schedule_with_warmup(self) -> None:
-        planned = compute_planned_optimizer_steps(steps_per_epoch=50, epochs=3, max_steps=None)
+        planned = compute_planned_optimizer_steps(
+            steps_per_epoch=50,
+            epochs=3,
+            max_steps=None,
+            gradient_accumulation_steps=1,
+        )
         self.assertEqual(planned, 150)
         warmup_steps = int(planned * 0.1)
         self.assertAlmostEqual(
@@ -510,6 +522,41 @@ class PipelineConfigTest(unittest.TestCase):
             ),
             0.0,
         )
+
+    def test_real_sft_planned_steps_respects_gradient_accumulation(self) -> None:
+        self.assertEqual(
+            compute_planned_optimizer_steps(
+                steps_per_epoch=51,
+                epochs=3,
+                max_steps=None,
+                gradient_accumulation_steps=4,
+            ),
+            39,
+        )
+        self.assertEqual(
+            compute_planned_optimizer_steps(
+                steps_per_epoch=51,
+                epochs=3,
+                max_steps=12,
+                gradient_accumulation_steps=4,
+            ),
+            12,
+        )
+
+    def test_real_sft_prefixes_train_eval_metrics(self) -> None:
+        metrics = {
+            "step": 8,
+            "epoch": 1,
+            "eval_loss": 1.25,
+            "eval_perplexity": 3.5,
+            "eval_tokens": 128,
+        }
+        prefixed = prefix_evaluation_metrics(metrics, prefix="train_eval")
+        self.assertEqual(prefixed["step"], 8)
+        self.assertEqual(prefixed["epoch"], 1)
+        self.assertEqual(prefixed["train_eval_loss"], 1.25)
+        self.assertEqual(prefixed["train_eval_perplexity"], 3.5)
+        self.assertEqual(prefixed["train_eval_tokens"], 128)
 
     def test_sft_comparison_summarizes_lora_and_full_runs(self) -> None:
         lora = {
